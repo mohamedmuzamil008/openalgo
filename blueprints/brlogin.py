@@ -109,6 +109,16 @@ def broker_callback(broker,para=None):
         auth_token, error_message = auth_function(code)
         forward_url = 'broker.html'
 
+    elif broker=='stocksdeveloper':
+        if request.method == 'GET':
+            if 'user' not in session:
+                return redirect(url_for('auth.login'))
+            return render_template('stocksdeveloper.html')
+
+        elif request.method == 'POST':   
+            auth_token, error_message = auth_function()
+            forward_url = 'stocksdeveloper.html'      
+
     elif broker == 'zebu':  
         if request.method == 'GET':
             if 'user' not in session:
@@ -140,9 +150,7 @@ def broker_callback(broker,para=None):
 
             auth_token, error_message = auth_function(otp,token,sid,userid,api_secret)
 
-            forward_url = 'kotak.html'
-
-   
+            forward_url = 'kotak.html'   
 
     else:
         code = request.args.get('code') or request.args.get('request_token')

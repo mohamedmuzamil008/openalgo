@@ -4,10 +4,9 @@ from importlib import import_module
 import multiprocessing
 import sys
 
-
-
 def dynamic_import(broker):
     try:
+        print(f"Connected broker is {broker}")
         module_path = f'broker.{broker}.api.funds'
         module = import_module(module_path)
         get_margin_data = getattr(module, 'get_margin_data')
@@ -38,6 +37,6 @@ def dashboard():
     if get_margin_data_func is None:
         return "Failed to import broker module", 500
 
-    margin_data = get_margin_data_func(AUTH_TOKEN)
+    margin_data = get_margin_data_func()
     return render_template('dashboard.html', margin_data=margin_data)
 

@@ -46,7 +46,7 @@ def orderbook():
     order_data = api_funcs['get_order_book'](auth_token)
     print(order_data)
     if 'status' in order_data:
-        if order_data['status'] == 'error':
+        if order_data['status'] == 'error' or order_data['status'] == 'False':
             return redirect(url_for('auth.logout'))
 
     order_data = mapping_funcs['map_order_data'](order_data=order_data)
@@ -85,19 +85,36 @@ def tradebook():
         return redirect(url_for('auth.logout'))
 
     # Using the dynamically imported `get_trade_book` function
-    get_trade_book = api_funcs['get_trade_book']
-    tradebook_data = get_trade_book(auth_token)
-    print(tradebook_data)
-  
-    if 'status' in tradebook_data and tradebook_data['status'] == 'error':
-        return redirect(url_for('auth.logout'))
+    if broker != 'stocksdeveloper':
+        get_trade_book = api_funcs['get_trade_book']
+        tradebook_data = get_trade_book(auth_token)
+        print(tradebook_data)
+    
+        if 'status' in tradebook_data and tradebook_data['status'] == 'error':
+            return redirect(url_for('auth.logout'))
 
-    # Using the dynamically imported mapping functions
-    map_trade_data = mapping_funcs['map_trade_data']
-    transform_tradebook_data = mapping_funcs['transform_tradebook_data']
-
-    tradebook_data = map_trade_data(trade_data=tradebook_data)
-    tradebook_data = transform_tradebook_data(tradebook_data)
+        # Using the dynamically imported mapping functions
+        map_trade_data = mapping_funcs['map_trade_data']
+        transform_tradebook_data = mapping_funcs['transform_tradebook_data']
+    
+        tradebook_data = map_trade_data(trade_data=tradebook_data)
+        tradebook_data = transform_tradebook_data(tradebook_data)
+    else:
+        # Fix for empty tradebook data from stocksdeveloper
+        transformed_data = []
+        transformed_trade = {
+            "symbol": "",
+            "exchange": "",
+            "product": "",
+            "action": "",
+            "quantity": 0,
+            "average_price": 0.0,
+            "trade_value": 0.0,
+            "orderid": "",
+            "timestamp": ""
+        }
+        transformed_data.append(transformed_trade)
+        tradebook_data = transformed_data
 
     return render_template('tradebook.html', tradebook_data=tradebook_data)
 
@@ -129,10 +146,11 @@ def positions():
     # Using the dynamically imported `get_positions` function
     get_positions = api_funcs['get_positions']
     positions_data = get_positions(auth_token)
-    print(positions_data)
-   
-    if 'status' in positions_data and positions_data['status'] == 'error':
-        return redirect(url_for('auth.logout'))
+    print(positions_data)   
+    
+    if 'status' in positions_data:
+        if positions_data['status'] == 'error' or positions_data['status'] == 'False':
+            return redirect(url_for('auth.logout'))
 
     # Using the dynamically imported mapping functions
     map_position_data = mapping_funcs['map_position_data']
@@ -173,9 +191,10 @@ def holdings():
     holdings_data = get_holdings(auth_token)
    
     print(holdings_data)
-
-    if 'status' in holdings_data and holdings_data['status'] == 'error':
-        return redirect(url_for('auth.logout'))
+    
+    if 'status' in holdings_data:
+        if holdings_data['status'] == 'error' or holdings_data['status'] == 'False':
+            return redirect(url_for('auth.logout'))
 
     # Using the dynamically imported mapping functions
     map_portfolio_data = mapping_funcs['map_portfolio_data']

@@ -50,3 +50,4 @@ wheel==0.43.0
 wrapt==1.16.0
 wsproto==1.2.0
 zipp==3.19.2
+AutoTrader-Web-API-Stocks-Developer

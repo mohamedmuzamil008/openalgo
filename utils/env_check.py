@@ -19,7 +19,7 @@ def load_and_check_env_variables():
         'BROKER_API_KEY', 'BROKER_API_SECRET', 'REDIRECT_URL', 'APP_KEY', 'DATABASE_URL',
         'NGROK_ALLOW', 'HOST_SERVER', 'FLASK_HOST_IP', 'FLASK_PORT', 'FLASK_DEBUG',
         'FLASK_APP_VERSION', 'LOGIN_RATE_LIMIT_MIN', 'LOGIN_RATE_LIMIT_HOUR',
-        'API_RATE_LIMIT', 'SMART_ORDER_DELAY'
+        'API_RATE_LIMIT', 'SMART_ORDER_DELAY', 'PSEUDO_ACCOUNT_ID'
     ]
 
     # Check if each required environment variable is set
