@@ -14,9 +14,9 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 engine = create_engine(
     DATABASE_URL,
-    pool_size=50,
-    max_overflow=100,
-    pool_timeout=10
+    pool_size=200,
+    max_overflow=400,
+    pool_timeout=60
 )
 
 db_session = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))

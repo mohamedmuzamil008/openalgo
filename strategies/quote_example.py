@@ -7,7 +7,7 @@ import time
 
 # Initialize feed client with explicit parameters
 client = api(
-    api_key="8009e08498f085ff1a3e7da718c5f4b585eaf9c2b7ce0c72740ab2b5d283d36c",  # Replace with your API key
+    api_key="3bbb0f0a09fc0c8ec8f1e10aef0e1b9ab09b8096fc5b118c9e503e851ecaecb9",  # Replace with your API key
     host="http://127.0.0.1:5000",  # Replace with your API host
     ws_url="ws://127.0.0.1:8765"  # Explicit WebSocket URL (can be different from REST API host)
 )

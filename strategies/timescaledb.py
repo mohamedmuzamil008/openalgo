@@ -56,9 +56,8 @@ except ImportError:
     logger.warning("Kafka library not available. Install with: pip install kafka-python")
 
 class TimescaleDBManager:
-    def __init__(self, dbname=os.getenv('TIMESCALE_DB_NAME'), dbname_live=os.getenv('TIMESCALE_DB_NAME_LIVE'), user=os.getenv('TIMESCALE_DB_USER'), password=os.getenv('TIMESCALE_DB_PASSWORD'), host=os.getenv('TIMESCALE_DB_HOST'), port=os.getenv('TIMESCALE_DB_PORT')):
+    def __init__(self, dbname=os.getenv('TIMESCALE_DB_NAME'), user=os.getenv('TIMESCALE_DB_USER'), password=os.getenv('TIMESCALE_DB_PASSWORD'), host=os.getenv('TIMESCALE_DB_HOST'), port=os.getenv('TIMESCALE_DB_PORT')):
         self.dbname = dbname
-        self.dbname_live = dbname_live
         self.user = user
         self.password = password
         self.host = host
@@ -387,7 +386,6 @@ class MarketDataProcessor:
         # Initialize TimescaleDBManager and connect to the database
         self.db_manager = TimescaleDBManager()
         self.db_conn = self.db_manager.initialize_database('openalgo')
-        self.db_live_conn = self.db_manager.initialize_database('openalgo_live')
         self.logger = logging.getLogger(f"MarketDataProcessor")
         self.interrupt_flag = False  # Add interrupt flag
 
@@ -1067,8 +1065,8 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
 
     client = api(
-        api_key="8009e08498f085ff1a3e7da718c5f4b585eaf9c2b7ce0c72740ab2b5d283d36c",  # Replace with your API key
-        host="http://127.0.0.1:5000"
+        api_key=os.getenv('APP_KEY'),  # Replace with your API key
+        host=os.getenv('HOST_SERVER')
     )
     # Start the timer
     start_time = time.time()
