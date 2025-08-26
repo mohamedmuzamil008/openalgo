@@ -1075,6 +1075,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Market Data Processor')
     parser.add_argument('--mode', type=str, choices=['live', 'backtest'], required=True,
                        help='Run mode: "live" for live processing, "backtest" for backtesting')
+    parser.add_argument('--mode2', type=str, choices=['data_ingestion', 'backtest'], required=True,
+                       help='Run mode: "data_ingestion" for data ingestion, "backtest" for backtesting')
     
     parser.add_argument('--from_date', type=str,
                        help='Start date for backtest (DD-MM-YYYY format)')
@@ -1218,7 +1220,7 @@ if __name__ == "__main__":
             logger.info(f"Running in backtest mode from {args.from_date} to {args.to_date}")
 
             end_date = to_date.strftime("%Y-%m-%d")     
-            start_date = (from_date - timedelta(days=20)).strftime("%Y-%m-%d") 
+            start_date = (from_date - timedelta(days=1)).strftime("%Y-%m-%d") #20 days
 
             # Cleaning the backtest results folder
             base_output_dir = args.backtest_folder
@@ -1286,66 +1288,67 @@ if __name__ == "__main__":
             
 
             # UNCOMMENT THIS BLOCK FOR FETCHING HISTORICAL DATA FOR ALL INTERVALS
-            # with ThreadPoolExecutor(max_workers=2) as executor:  # Reduced to prevent server overload
-            #     futures = []
-                
-            #     try:
-            #         for symbol, interval in symbol_interval_pairs:
-            #             time.sleep(1.5)  # Increased delay to reduce server pressure
-            #             futures.append(
-            #                 executor.submit(
-            #                     processor.process_symbol_interval,
-            #                     symbol,
-            #                     interval,
-            #                     client,
-            #                     start_date,
-            #                     end_date,
-            #                     "backtest"
-            #                 )
-            #             )
+            if args.mode2 == 'data_ingestion':
+                with ThreadPoolExecutor(max_workers=2) as executor:  # Reduced to prevent server overload
+                    futures = []
                     
-            #         # Wait for all tasks to complete with proper interrupt handling
-            #         completed = 0
-            #         total = len(futures)
-                    
-            #         for future in futures:
-            #             try:
-            #                 future.result(timeout=30)  # 30 second timeout per task
-            #                 completed += 1
-            #                 if completed % 10 == 0:  # Progress update every 10 tasks
-            #                     logger.info(f"📊 Progress: {completed}/{total} tasks completed")
-            #             except TimeoutError:
-            #                 logger.warning(f"⏰ Task timed out, continuing with next task")
-            #                 future.cancel()
-            #             except Exception as e:
-            #                 logger.error(f"❌ Task failed: {e}")
-                    
-            #         logger.info(f"✅ All {total} data fetching tasks completed")
-                    
-            #     except KeyboardInterrupt:
-            #         logger.warning("\n🛑 KeyboardInterrupt received! Stopping all tasks...")
-                    
-            #         # Set interrupt flag to stop running tasks
-            #         processor.interrupt_flag = True
-                    
-            #         # Cancel all pending futures
-            #         cancelled_count = 0
-            #         for future in futures:
-            #             if future.cancel():
-            #                 cancelled_count += 1
-                    
-            #         logger.info(f"📝 Cancelled {cancelled_count} pending tasks")
-                    
-            #         # Force shutdown the executor
-            #         logger.info("🔄 Shutting down executor...")
-            #         executor.shutdown(wait=False)
-                    
-            #         # Give running tasks a moment to cleanup and check interrupt flag
-            #         logger.info("⏳ Waiting for running tasks to cleanup...")
-            #         time.sleep(3)
-                    
-            #         logger.info("🛑 Data fetching interrupted by user")
-            #         raise  # Re-raise to exit the program
+                    try:
+                        for symbol, interval in symbol_interval_pairs:
+                            time.sleep(1.5)  # Increased delay to reduce server pressure
+                            futures.append(
+                                executor.submit(
+                                    processor.process_symbol_interval,
+                                    symbol,
+                                    interval,
+                                    client,
+                                    start_date,
+                                    end_date,
+                                    "backtest"
+                                )
+                            )
+                        
+                        # Wait for all tasks to complete with proper interrupt handling
+                        completed = 0
+                        total = len(futures)
+                        
+                        for future in futures:
+                            try:
+                                future.result(timeout=30)  # 30 second timeout per task
+                                completed += 1
+                                if completed % 10 == 0:  # Progress update every 10 tasks
+                                    logger.info(f"📊 Progress: {completed}/{total} tasks completed")
+                            except TimeoutError:
+                                logger.warning(f"⏰ Task timed out, continuing with next task")
+                                future.cancel()
+                            except Exception as e:
+                                logger.error(f"❌ Task failed: {e}")
+                        
+                        logger.info(f"✅ All {total} data fetching tasks completed")
+                        
+                    except KeyboardInterrupt:
+                        logger.warning("\n🛑 KeyboardInterrupt received! Stopping all tasks...")
+                        
+                        # Set interrupt flag to stop running tasks
+                        processor.interrupt_flag = True
+                        
+                        # Cancel all pending futures
+                        cancelled_count = 0
+                        for future in futures:
+                            if future.cancel():
+                                cancelled_count += 1
+                        
+                        logger.info(f"📝 Cancelled {cancelled_count} pending tasks")
+                        
+                        # Force shutdown the executor
+                        logger.info("🔄 Shutting down executor...")
+                        executor.shutdown(wait=False)
+                        
+                        # Give running tasks a moment to cleanup and check interrupt flag
+                        logger.info("⏳ Waiting for running tasks to cleanup...")
+                        time.sleep(3)
+                        
+                        logger.info("🛑 Data fetching interrupted by user")
+                        raise  # Re-raise to exit the program
 
             
             # Without threading
@@ -1869,31 +1872,32 @@ if __name__ == "__main__":
                 host=db_config['host'],
                 port=db_config['port'],
                 dbname=db_config['dbname']
-            )    
-            
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                futures = []                
-                for symbol in symbol_list:
-                    futures.append(executor.submit(run_backtest_for_symbol, symbol, connection_pool, from_date, to_date, base_output_dir))
-                try:
-                    for i, future in enumerate(futures):
-                        try:
-                            future.result()
-                            logger.info(f"✅ Future {i+1}/{len(futures)} completed successfully")
-                        except Exception as e:
-                            logger.error(f"❌ Future {i+1}/{len(futures)} failed with error: {e}")
-                            logger.error(f"Error type: {type(e).__name__}")
-                            import traceback
-                            logger.error(f"Traceback: {traceback.format_exc()}")
-                            raise  # Re-raise the error
-                except KeyboardInterrupt:
-                    print("Interrupted by user. Cancelling all futures.")
-                    for future in futures:
-                        future.cancel()
-                    executor.shutdown(wait=False, cancel_futures=True)
-                
-            # Aggregate summaries from the organized folder structure                
-            aggregate_all_summaries(base_output_dir, "master_summary.csv")               
+            )  
+
+            if args.mode2 == 'backtest':              
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = []                
+                    for symbol in symbol_list:
+                        futures.append(executor.submit(run_backtest_for_symbol, symbol, connection_pool, from_date, to_date, base_output_dir))
+                    try:
+                        for i, future in enumerate(futures):
+                            try:
+                                future.result()
+                                logger.info(f"✅ Future {i+1}/{len(futures)} completed successfully")
+                            except Exception as e:
+                                logger.error(f"❌ Future {i+1}/{len(futures)} failed with error: {e}")
+                                logger.error(f"Error type: {type(e).__name__}")
+                                import traceback
+                                logger.error(f"Traceback: {traceback.format_exc()}")
+                                raise  # Re-raise the error
+                    except KeyboardInterrupt:
+                        print("Interrupted by user. Cancelling all futures.")
+                        for future in futures:
+                            future.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    
+                # Aggregate summaries from the organized folder structure                
+                aggregate_all_summaries(base_output_dir, "master_summary.csv")               
             
             # End the timer
             end_time = time.time()

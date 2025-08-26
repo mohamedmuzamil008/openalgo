@@ -2,7 +2,6 @@ venopenalgo
 .venv/
 .env
 openalgo.db
-.env
 .flaskenv
 *.pyc
 __pycache__/
@@ -16,7 +15,6 @@ config.ini
 .venvv
 
 #DB Files, CSV Files and Log/Tmp Files
-
 *.egg-info/
 *.db
 *.sqlite
@@ -25,16 +23,15 @@ config.ini
 checkpoint.txt
 checkpoints.json
 
-# CSV Files (except symbols.csv)
+# CSV Files (except specific ones)
 *.csv
 !symbols.csv
-
-*.png
-*.txt
-*.py
-=======
 !all_symbols.csv
+*.txt
+backtest_results/
 
+# Image files
+*.png
 
 # Environments 
 .env 
