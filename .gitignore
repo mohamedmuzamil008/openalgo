@@ -20,6 +20,7 @@ config.ini
 *.sqlite
 *.log
 *.tmp
+*.jpg
 checkpoint.txt
 checkpoints.json
 
@@ -29,6 +30,7 @@ checkpoints.json
 !all_symbols.csv
 *.txt
 backtest_results/
+data_ingestion/
 
 # Image files
 *.png

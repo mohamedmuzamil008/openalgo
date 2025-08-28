@@ -732,8 +732,8 @@ class HeartbeatMonitor:
         overall_status = True  # Initialize status at the start
         current_time = datetime.now(IST)  # Changed from UTC to IST to match market time
         
-        # Only check every 30 seconds
-        if (current_time - self.last_check_time).total_seconds() < 30:
+        # Only check every 90 seconds
+        if (current_time - self.last_check_time).total_seconds() < 90:
             return overall_status
             
         self.last_check_time = current_time
@@ -754,17 +754,17 @@ class HeartbeatMonitor:
                     'min_data_points': 6  # Expected data points in lookback period
                 },
                 '15m': {
-                    'lookback_minutes': 90,
+                    'lookback_minutes': 120,
                     'interval': '15 minutes',
                     'table': 'ohlc_15m',
-                    'min_data_points': 6  # Expected data points in lookback period
+                    'min_data_points': 8  # Expected data points in lookback period
                 }
             }
             
             overall_status = True  # Track if all timeframes are healthy
             
-            # Get market start time for today
-            market_start_time = datetime.combine(current_time.date(), self.market_start).replace(tzinfo=IST)  # Changed from UTC to IST
+            # Get market start time for today - ensure same timezone as current_time
+            market_start_time = current_time.replace(hour=self.market_start.hour, minute=self.market_start.minute, second=0, microsecond=0)
             
             for timeframe, config in timeframe_configs.items():
                 # Calculate time range for this timeframe
@@ -780,7 +780,7 @@ class HeartbeatMonitor:
                     minutes_to_align = current_aligned.minute % interval_minutes
                     if minutes_to_align == 0:
                         # If we're exactly at an interval boundary, go back one full interval
-                        end_time = current_aligned - timedelta(minutes=interval_minutes)
+                        end_time = current_aligned - timedelta(minutes=2 * interval_minutes)
                     else:
                         # Otherwise, align to the previous interval
                         end_time = current_aligned - timedelta(minutes=minutes_to_align+interval_minutes)
@@ -789,6 +789,31 @@ class HeartbeatMonitor:
                 start_time = end_time - timedelta(minutes=config['lookback_minutes'])
                 if start_time < market_start_time:
                     start_time = market_start_time
+                
+                # Ensure both times are properly aligned to interval boundaries for proper generate_series
+                if timeframe != '1m':
+                    interval_minutes = int(timeframe[:-1])
+                    
+                    # Force align start_time to interval boundary (important for generate_series)
+                    start_minutes = start_time.minute % interval_minutes
+                    if start_minutes != 0:
+                        # Preserve timezone while aligning
+                        start_time = start_time.replace(minute=start_time.minute - start_minutes, second=0, microsecond=0)
+                    
+                    # Force align end_time to interval boundary
+                    end_minutes = end_time.minute % interval_minutes  
+                    if end_minutes != 0:
+                        # Preserve timezone while aligning
+                        end_time = end_time.replace(minute=end_time.minute - end_minutes, second=0, microsecond=0)
+                
+                # Final check: Ensure both times have consistent timezone representation
+                if start_time.tzinfo != end_time.tzinfo or start_time.strftime('%z') != end_time.strftime('%z'):
+                    colored_log(self.logger, 'warning', 
+                              f"Timezone mismatch detected for {timeframe}: start_tz={start_time.strftime('%z')}, end_tz={end_time.strftime('%z')}", 
+                              success=False)
+                    # Force both to have same timezone as current_time
+                    start_time = start_time.replace(tzinfo=current_time.tzinfo)
+                    end_time = end_time.replace(tzinfo=current_time.tzinfo)
                 
                 # Critical fix: Ensure start_time is always before end_time
                 if start_time >= end_time:
@@ -802,9 +827,10 @@ class HeartbeatMonitor:
                           f"Checking {timeframe} data from {start_time.strftime('%H:%M:%S')} to {end_time.strftime('%H:%M:%S')} (current time: {current_time.strftime('%H:%M:%S')})", 
                           success=True)
                 
+                # Debug: Show timezone info to catch timezone inconsistencies  
                 colored_log(self.logger, 'debug', 
-                          f"Adjusted {timeframe} lookback to market start ({market_start_time.strftime('%H:%M:%S')})", 
-                          success=True)
+                          f"Timezone check - start: {start_time.strftime('%H:%M:%S %z')}, end: {end_time.strftime('%H:%M:%S %z')}", 
+                          success=True)               
                 
                 # # Debug: Check what's in the table
                 # debug_query = f"SELECT COUNT(*) as count FROM {config['table']}"
@@ -1053,10 +1079,14 @@ class LiveDataManager:
 
         self.reset_aggregation_buffers()               
         
-        self.db_manager.clean_database(db_config['dbname'])   
+        #self.db_manager.clean_database(db_config['dbname'])   
 
-        # Initialize with historical data
-        self._load_historical_data(20, self.symbols, ['5m', '15m', 'D'])   
+        # Check if the database has last 20 days of data for all symbols. If not load the data.
+        self.is_historical_data_loaded = self.check_historical_data_loaded(20, self.symbols, ['5m', '15m', 'D'])
+
+        if not self.is_historical_data_loaded:
+            # Initialize with historical data
+            self._load_historical_data(20, self.symbols, ['5m', '15m', 'D'])   
         
         # Connect and subscribe to real-time data
         self.api_client.connect()
@@ -1074,6 +1104,69 @@ class LiveDataManager:
         self.is_running = False
         self.data_thread = None  
 
+    
+    def check_historical_data_loaded(self, days, symbols, intervals):
+        """Check if the database has last N days of data for all symbols across all intervals. If not, return False."""
+        try:
+            current_date = datetime.now(IST).date()
+            start_date = current_date - timedelta(days=days)
+            
+            colored_log(self.logger, 'info', f"Checking historical data for {len(symbols)} symbols across {len(intervals)} intervals for last {days} days", success=True)
+            
+            # Check each interval (timeframe)
+            for interval in intervals:
+                table_name = f"ohlc_{interval}"
+                colored_log(self.logger, 'debug', f"Checking table {table_name} for {len(symbols)} symbols", success=True)
+                
+                # Check each symbol
+                for symbol in symbols:
+                    # Query to check if symbol has data in the required date range
+                    check_query = f"""
+                        SELECT COUNT(*) as record_count,
+                               MIN(DATE(time)) as earliest_date,
+                               MAX(DATE(time)) as latest_date
+                        FROM {table_name}
+                        WHERE symbol = %s 
+                        AND DATE(time) >= %s 
+                        AND DATE(time) <= %s
+                    """
+                    
+                    result = pd.read_sql(check_query, self.db_conn, params=(symbol, start_date, current_date))
+                    
+                    if result.empty:
+                        colored_log(self.logger, 'warning', f"No data found for {symbol} in {table_name}", success=False)
+                        return False
+                    
+                    record_count = result.iloc[0]['record_count']
+                    earliest_date = result.iloc[0]['earliest_date']
+                    latest_date = result.iloc[0]['latest_date']
+                    
+                    if record_count == 0:
+                        colored_log(self.logger, 'warning', f"No records found for {symbol} in {table_name} for date range {start_date} to {current_date}", success=False)
+                        return False
+                    
+                    # Check if we have recent data (at least within last 2 days)
+                    if latest_date is None or (current_date - latest_date).days > 2:
+                        colored_log(self.logger, 'warning', f"Latest data for {symbol} in {table_name} is from {latest_date}, which is too old", success=False)
+                        return False
+
+                    if earliest_date is None or (current_date - earliest_date).days < days:
+                        print(current_date, earliest_date, (current_date - earliest_date).days)
+                        colored_log(self.logger, 'warning', f"Earliest data for {symbol} in {table_name} is from {earliest_date}, which is not enough for {days} days", success=False)
+                        return False
+                    
+                    colored_log(self.logger, 'debug', f"{symbol} in {table_name}: {record_count} records, date range: {earliest_date} to {latest_date}", success=True)
+            
+            colored_log(self.logger, 'info', f"Historical data check PASSED: All {len(symbols)} symbols have data across all {len(intervals)} intervals", success=True)
+            return True
+            
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error checking historical data loaded: {e}", success=False)
+            import traceback
+            colored_log(self.logger, 'error', traceback.format_exc(), success=False)
+            return False
+
+
     def emergency_data_recovery(self, timeframe=None, specific_symbols=None):
         """
         Attempt to recover from data gaps
@@ -1081,7 +1174,7 @@ class LiveDataManager:
             timeframe: Specific timeframe to recover ('1m', '5m', '15m'). If None, recovers all timeframes.
             specific_symbols: List of specific symbols to recover. If None, recovers all symbols.
         """
-        colored_log(self.logger, 'info', "ENTERED EMERGENCY DATA RECOVERY...", success=True)
+        colored_log(self.logger, 'debug', "ENTERED EMERGENCY DATA RECOVERY...", success=True)
         try:
             # Use specific symbols if provided, otherwise all symbols
             symbols_to_recover = specific_symbols if specific_symbols else self.symbols
@@ -1093,7 +1186,33 @@ class LiveDataManager:
                        f"Attempting data recovery for timeframe(s): {timeframes_to_recover}, symbols: {symbols_to_recover}", 
                        success=False)
             
-            self._load_historical_data(1, symbols_to_recover, timeframes_to_recover, 'recovery')                                   
+            #self._load_historical_data(1, symbols_to_recover, timeframes_to_recover, 'recovery')     
+
+            current_time = datetime.now(IST)
+            current_date = current_time.date()
+            # For 1m, we need to fetch data from last 10 minutes. Other timeframes we need to fetch data from 9:15 AM.
+            if timeframe == '1m':
+                start_time = current_time - timedelta(minutes = 10).strftime('%H:%M:%S')            
+            else:
+                start_time = current_time.replace(hour=9, minute=15, second=0, microsecond=0).strftime('%H:%M:%S')            
+            date_str = current_date.strftime("%Y-%m-%d")
+            current_aligned = current_time.replace(second=0, microsecond=0)
+
+            for symbol in symbols_to_recover:
+                for timeframe in timeframes_to_recover:
+                    if timeframe == '1m':
+                        end_time = (current_aligned - timedelta(minutes=1)).strftime('%H:%M:%S')
+                    else:
+                        interval_minutes = int(timeframe[:-1])
+                        minutes_to_align = current_aligned.minute % interval_minutes
+                        if minutes_to_align == 0:
+                            end_time = (current_aligned - timedelta(minutes=interval_minutes)).strftime('%H:%M:%S')
+                        else:
+                            end_time = (current_aligned - timedelta(minutes=minutes_to_align)).strftime('%H:%M:%S')
+
+                    self.fetch_intraday_data(symbol, timeframe, self.api_client, date_str, date_str, start_time, end_time, 'recovery')     
+
+            colored_log(self.logger, 'info', "EMERGENCY DATA RECOVERY COMPLETED!", success=True)                                                 
         
         except Exception as e:
             colored_log(self.logger, 'error', f"Emergency recovery failed: {e}", success=False)
@@ -1197,7 +1316,7 @@ class LiveDataManager:
                 for future, symbol, interval in futures:
                     try:
                         future.result(timeout=300)  # 5 minute timeout per symbol-interval
-                        colored_log(self.logger, 'info', f"Completed {symbol} {interval}", success=True)
+                        colored_log(self.logger, 'debug', f"Completed {symbol} {interval}", success=True)
                     except Exception as e:
                         colored_log(self.logger, 'error', f"Failed {symbol} {interval}: {e}", success=False)            
             
@@ -2097,7 +2216,7 @@ class LiveDataManager:
                 """, records)
                 
                 conn.commit()
-                colored_log(self.logger, 'info', f"Successfully inserted {len(df)} records for {symbol} ({interval}) into {table_name}", success=True)
+                colored_log(self.logger, 'debug', f"Successfully inserted {len(df)} records for {symbol} ({interval}) into {table_name}", success=True)
                 return True
                 
         except KeyError as e:
@@ -2132,7 +2251,7 @@ class LiveDataManager:
     
     def _real_time_data_loop(self):
         """Main loop for processing real-time tick data using TimescaleDB's message processing"""
-        heartbeat_check_interval = 30  # Changed to 60 seconds for all timeframes
+        heartbeat_check_interval = 90  # Changed to 90 seconds for all timeframes
         last_heartbeat_check = time_module.time()
         colored_log(self.logger, 'info', "Starting real-time data monitoring (30s interval)", success=True)
 
@@ -2188,7 +2307,7 @@ class LiveDataManager:
                         return False
                     
                     last_fetch = self._last_fetch_times[interval_key]
-                    if last_fetch is None or (current_time - last_fetch).total_seconds() >= 30:  # Allow 5s buffer
+                    if last_fetch is None or (current_time - last_fetch).total_seconds() >= 55:  # Allow 5s buffer
                         self._last_fetch_times[interval_key] = current_time
                         return True
                     return False
@@ -2196,20 +2315,22 @@ class LiveDataManager:
                 # Fetch 1-min data
                 if should_fetch('1m', 1):
                     start_time = (current_time - timedelta(minutes=2)).time().strftime('%H:%M:%S') # 2 minutes buffer
-                    #end_time = (current_time + timedelta(minutes=1)).time().strftime('%H:%M:%S')
-                    end_time = current_time.time().strftime('%H:%M:%S')
+                    end_time = (current_time + timedelta(minutes=1)).time().strftime('%H:%M:%S')
+                    #nd_time = current_time.time().strftime('%H:%M:%S')
                     
                        
                     date_str = current_date.strftime('%Y-%m-%d')
                     for symbol in self.symbols:
                         self.fetch_intraday_data(symbol, '1m', self.api_client, date_str, date_str, start_time, end_time, 'recovery')
                         self.on_new_candle(symbol, '1m', current_time.time())
-                    colored_log(self.logger, 'info', "Loaded 1-min data for all symbols", success=True)
+                    colored_log(self.logger, 'info', f"Loaded 1-min data for all symbols. Latest data time: {end_time}", success=True)
 
                 # Fetch 5-min data
                 if should_fetch('5m', 5):
                     start_time = (current_time - timedelta(minutes=6)).time().strftime('%H:%M:%S') # 6 minutes buffer
-                    end_time = (current_time + timedelta(minutes=5)).time().strftime('%H:%M:%S')
+                    #end_time = (current_time + timedelta(minutes=5)).time().strftime('%H:%M:%S')
+                    end_time = current_time.time().strftime('%H:%M:%S')
+
                     
                     date_str = current_date.strftime('%Y-%m-%d')
                     for symbol in self.symbols:
@@ -2220,7 +2341,8 @@ class LiveDataManager:
                 # Fetch 15-min data
                 if should_fetch('15m', 15):
                     start_time = (current_time - timedelta(minutes=16)).time().strftime('%H:%M:%S') # 16 minutes buffer
-                    end_time = (current_time + timedelta(minutes=15)).time().strftime('%H:%M:%S')
+                    #end_time = (current_time + timedelta(minutes=15)).time().strftime('%H:%M:%S')
+                    end_time = current_time.time().strftime('%H:%M:%S')
                     
                     date_str = current_date.strftime('%Y-%m-%d')
                     for symbol in self.symbols:
@@ -2772,6 +2894,7 @@ class LiveTradingEngine:
                     continue
                 
                 current_time = datetime.now(IST)
+                colored_log(self.logger, 'debug', f"Scanning symbols at {current_time.strftime('%H:%M:%S')}", success=True)
                 
                 # Scan all symbols for entry signals
                 for symbol in self.symbols:
@@ -2784,7 +2907,7 @@ class LiveTradingEngine:
                         colored_log(self.logger, 'error', f"Error processing {symbol}: {e}", success=False)
                 
                 # Short delay between scans
-                time_module.sleep(1)  # 1 second scan frequency
+                time_module.sleep(20)  # 20 second scan frequency
                 
             except Exception as e:
                 colored_log(self.logger, 'error', f"Error in symbol scanner: {e}", success=False)
@@ -2804,6 +2927,7 @@ class LiveTradingEngine:
         # Check for long entries (Strategy 12 and 11)
         long_signal = signals['strategy_12'] or signals['strategy_11']
         if long_signal:
+            colored_log(self.logger, 'info', f"LONG SIGNAL:: SYMBOL: {symbol} | STRATEGY: {strategy} | TIME: {current_time.strftime('%H:%M:%S')}", success=True)
             strategy = '12' if signals['strategy_12'] else '11'
             can_trade, reason = self.position_manager.can_open_position(symbol, strategy, current_date)
             
@@ -2815,6 +2939,7 @@ class LiveTradingEngine:
         # Check for short entries (Strategy 8, 10, 9)
         short_signal = signals['strategy_8'] or signals['strategy_10'] or signals['strategy_9']
         if short_signal:
+            colored_log(self.logger, 'info', f"SHORT SIGNAL:: SYMBOL: {symbol} | STRATEGY: {strategy} | TIME: {current_time.strftime('%H:%M:%S')}", success=True)
             strategy = '8' if signals['strategy_8'] else ('10' if signals['strategy_10'] else '9')
             can_trade, reason = self.position_manager.can_open_position(symbol, strategy, current_date)
             
@@ -2826,6 +2951,7 @@ class LiveTradingEngine:
     def _execute_entry(self, symbol, direction, strategy, timestamp):
         """Execute entry order"""
         try:
+            colored_log(self.logger, 'info', f"EXECUTING ENTRY:: SYMBOL: {symbol} | DIRECTION: {direction} | STRATEGY: {strategy} | TIME: {timestamp.strftime('%H:%M:%S')}", success=True)
             # Get current price from latest data
             latest_data = self.data_manager.get_latest_data(symbol, '1m', 1)
             if latest_data.empty:
@@ -2852,6 +2978,7 @@ class LiveTradingEngine:
             sl_order_response = self.order_manager.place_sl_order(symbol, quantity, sl_side, sl_price)
             
             if order_response:
+                colored_log(self.logger, 'info', f"ENTRY PLACED:: SYMBOL: {symbol} | DIRECTION: {direction} | STRATEGY: {strategy} | ORDER ID: {order_response} | SL ORDER ID: {sl_order_response} | TIME: {timestamp.strftime('%H:%M:%S')}", success=True)
                 # Record position (assuming order filled at current price)
                 self.position_manager.open_position(
                     symbol=symbol,
