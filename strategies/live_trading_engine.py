@@ -486,9 +486,7 @@ class DatabaseManager:
                 close DECIMAL(18, 2),
                 volume BIGINT,
                 atr_10 DECIMAL(18, 2),
-                volume_10 BIGINT,
-                atr_14 DECIMAL(18, 2),
-                volume_14 BIGINT,
+                volume_10 BIGINT,                
                 nifty_trend_15m INT,
                 curbot DECIMAL(18, 2),
                 curtop DECIMAL(18, 2),
@@ -515,8 +513,6 @@ class DatabaseManager:
                 volume BIGINT,
                 atr_10 DECIMAL(18, 2),
                 volume_10 BIGINT,
-                atr_14 DECIMAL(18, 2),
-                volume_14 BIGINT,
                 nifty_trend_15m INT,
                 curbot DECIMAL(18, 2),
                 curtop DECIMAL(18, 2),
@@ -717,7 +713,7 @@ class DatabaseManager:
 
 class HeartbeatMonitor:
     """Monitors real-time data continuity"""
-    def __init__(self, db_conn, logger, symbols, api_client, market_start):
+    def __init__(self, db_conn, logger, symbols, api_client, market_start, get_active_symbols_callback=None):
         self.db_conn = db_conn
         self.logger = logger
         self.last_check_time = datetime.now(UTC)
@@ -726,14 +722,15 @@ class HeartbeatMonitor:
         self.symbols = symbols
         self.api_client = api_client
         self.market_start = market_start  # Market start time
+        self.get_active_symbols = get_active_symbols_callback  # Callback to get symbols with active positions
 
     def check_data_continuity(self, data_manager=None):
         """Check if OHLC data is arriving continuously for all timeframes with recovery option"""
         overall_status = True  # Initialize status at the start
         current_time = datetime.now(IST)  # Changed from UTC to IST to match market time
         
-        # Only check every 90 seconds
-        if (current_time - self.last_check_time).total_seconds() < 90:
+        # Only check every 60 seconds
+        if (current_time - self.last_check_time).total_seconds() < 120:
             return overall_status
             
         self.last_check_time = current_time
@@ -767,6 +764,16 @@ class HeartbeatMonitor:
             market_start_time = current_time.replace(hour=self.market_start.hour, minute=self.market_start.minute, second=0, microsecond=0)
             
             for timeframe, config in timeframe_configs.items():
+                # Get symbols to check based on timeframe
+                if timeframe == '1m':
+                    # For 1m timeframe, only check symbols with active positions (used for exit signals)
+                    symbols_to_check = self.get_active_symbols() if self.get_active_symbols else []
+                    if not symbols_to_check:
+                        colored_log(self.logger, 'debug', f"No active positions - skipping 1m data continuity check", success=True)
+                        continue
+                else:
+                    # For 5m and 15m timeframes, check all symbols (used for entry signals)
+                    symbols_to_check = self.symbols
                 # Calculate time range for this timeframe
                 # First, get the current time and align it to the previous completed interval
                 current_aligned = current_time.replace(second=0, microsecond=0)
@@ -907,11 +914,11 @@ class HeartbeatMonitor:
                 """
             
                 # Pass symbols as parameter (convert to PostgreSQL array format)
-                symbols_param = "{" + ",".join(self.symbols) + "}"
+                symbols_param = "{" + ",".join(symbols_to_check) + "}"
                 
                 # Add debug logging for query parameters
                 colored_log(self.logger, 'debug', 
-                          f"Data continuity check for {timeframe}: start_time={start_time}, end_time={end_time}, symbols={self.symbols}", 
+                          f"Data continuity check for {timeframe}: start_time={start_time}, end_time={end_time}, symbols={symbols_to_check}", 
                           success=True)
                 
                 # # Debug: Check what data is in the expected time range
@@ -981,7 +988,7 @@ class HeartbeatMonitor:
                 # Check for completely missing symbols (not in database at all)
                 if symbol_df is not None and not symbol_df.empty:
                     all_symbols_in_db = symbol_df['expected_symbol'].unique().tolist()
-                    completely_missing_symbols = [s for s in self.symbols if s not in all_symbols_in_db]
+                    completely_missing_symbols = [s for s in symbols_to_check if s not in all_symbols_in_db]
                     
                     if completely_missing_symbols:
                         alert_msg = f"COMPLETELY MISSING SYMBOLS ({timeframe}): {completely_missing_symbols}"
@@ -1005,7 +1012,7 @@ class HeartbeatMonitor:
                 # Log status for this timeframe
                 if missing_intervals_count == 0 and incomplete_symbols_count == 0:
                     colored_log(self.logger, 'info', 
-                              f"DATA OK ({timeframe}): All {len(self.symbols)} symbols have complete data for last {config['lookback_minutes']} minutes", 
+                              f"DATA OK ({timeframe}): All {len(symbols_to_check)} symbols have complete data for last {config['lookback_minutes']} minutes", 
                               success=True)
                 else:
                     colored_log(self.logger, 'warning', 
@@ -1047,7 +1054,7 @@ def colored_log(logger, level, message, success=None):
 
 class LiveDataManager:
     """Manages real-time data and indicator calculations"""
-    def __init__(self, db_config, api_client, api_key, symbols, market_start, market_end):
+    def __init__(self, db_config, api_client, api_key, symbols, market_start, market_end, get_active_symbols_callback=None):
         self.db_manager = DatabaseManager(db_config)
         self.db_conn = self.db_manager.initialize_database(db_config['dbname'])        
         self.symbols = symbols
@@ -1057,6 +1064,7 @@ class LiveDataManager:
         self.api_key = api_key
         self.market_start = market_start
         self.market_end = market_end
+        self.get_active_symbols = get_active_symbols_callback  # Callback to get symbols with active positions
         self.interrupt_flag = False  # Add interrupt flag
         self.lock = threading.RLock()
         self.logger = logging.getLogger("LiveDataManager")
@@ -1082,11 +1090,14 @@ class LiveDataManager:
         #self.db_manager.clean_database(db_config['dbname'])   
 
         # Check if the database has last 20 days of data for all symbols. If not load the data.
-        self.is_historical_data_loaded = self.check_historical_data_loaded(20, self.symbols, ['5m', '15m', 'D'])
+        symbols_needing_data = self.check_historical_data_loaded(20, self.symbols, ['5m', '15m', 'D'])
 
-        if not self.is_historical_data_loaded:
-            # Initialize with historical data
-            self._load_historical_data(20, self.symbols, ['5m', '15m', 'D'])   
+        if symbols_needing_data:
+            # Initialize with historical data only for symbols that need it
+            colored_log(self.logger, 'info', f"Loading historical data for {len(symbols_needing_data)} symbols: {symbols_needing_data}", success=True)
+            self._load_historical_data(20, symbols_needing_data, ['5m', '15m', 'D'])
+        else:
+            colored_log(self.logger, 'info', "All symbols have complete historical data - skipping data loading", success=True)   
         
         # Connect and subscribe to real-time data
         self.api_client.connect()
@@ -1098,7 +1109,8 @@ class LiveDataManager:
             logger=self.logger,
             symbols=self.symbols,
             api_client=self.api_client,
-            market_start=self.market_start
+            market_start=self.market_start,
+            get_active_symbols_callback=self.get_active_symbols
         )
 
         self.is_running = False
@@ -1106,12 +1118,15 @@ class LiveDataManager:
 
     
     def check_historical_data_loaded(self, days, symbols, intervals):
-        """Check if the database has last N days of data for all symbols across all intervals. If not, return False."""
+        """Check if the database has last N days of data for all symbols across all intervals. 
+        Returns a list of symbols that need data loading, or empty list if all symbols have complete data."""
         try:
             current_date = datetime.now(IST).date()
             start_date = current_date - timedelta(days=days)
             
             colored_log(self.logger, 'info', f"Checking historical data for {len(symbols)} symbols across {len(intervals)} intervals for last {days} days", success=True)
+            
+            symbols_needing_data = set()  # Use set to avoid duplicates
             
             # Check each interval (timeframe)
             for interval in intervals:
@@ -1133,38 +1148,49 @@ class LiveDataManager:
                     
                     result = pd.read_sql(check_query, self.db_conn, params=(symbol, start_date, current_date))
                     
+                    needs_data = False
+                    
                     if result.empty:
                         colored_log(self.logger, 'warning', f"No data found for {symbol} in {table_name}", success=False)
-                        return False
-                    
-                    record_count = result.iloc[0]['record_count']
-                    earliest_date = result.iloc[0]['earliest_date']
-                    latest_date = result.iloc[0]['latest_date']
-                    
-                    if record_count == 0:
-                        colored_log(self.logger, 'warning', f"No records found for {symbol} in {table_name} for date range {start_date} to {current_date}", success=False)
-                        return False
-                    
-                    # Check if we have recent data (at least within last 2 days)
-                    if latest_date is None or (current_date - latest_date).days > 2:
-                        colored_log(self.logger, 'warning', f"Latest data for {symbol} in {table_name} is from {latest_date}, which is too old", success=False)
-                        return False
+                        needs_data = True
+                    else:
+                        record_count = result.iloc[0]['record_count']
+                        earliest_date = result.iloc[0]['earliest_date']
+                        latest_date = result.iloc[0]['latest_date']
+                        
+                        if record_count == 0:
+                            colored_log(self.logger, 'warning', f"No records found for {symbol} in {table_name} for date range {start_date} to {current_date}", success=False)
+                            needs_data = True
+                        
+                        # Check if we have recent data (at least within last 2 days)
+                        elif latest_date is None or (current_date - latest_date).days > 2:
+                            colored_log(self.logger, 'warning', f"Latest data for {symbol} in {table_name} is from {latest_date}, which is too old", success=False)
+                            needs_data = True
 
-                    if earliest_date is None or (current_date - earliest_date).days < days:
-                        print(current_date, earliest_date, (current_date - earliest_date).days)
-                        colored_log(self.logger, 'warning', f"Earliest data for {symbol} in {table_name} is from {earliest_date}, which is not enough for {days} days", success=False)
-                        return False
+                        elif earliest_date is None or (current_date - earliest_date).days < (days - 3):
+                            colored_log(self.logger, 'warning', f"Earliest data for {symbol} in {table_name} is from {earliest_date}, which is not enough for {days} days", success=False)
+                            needs_data = True
+                        
+                        else:
+                            colored_log(self.logger, 'debug', f"{symbol} in {table_name}: {record_count} records, date range: {earliest_date} to {latest_date}", success=True)
                     
-                    colored_log(self.logger, 'debug', f"{symbol} in {table_name}: {record_count} records, date range: {earliest_date} to {latest_date}", success=True)
+                    if needs_data:
+                        symbols_needing_data.add(symbol)
             
-            colored_log(self.logger, 'info', f"Historical data check PASSED: All {len(symbols)} symbols have data across all {len(intervals)} intervals", success=True)
-            return True
+            symbols_needing_data_list = list(symbols_needing_data)
+            
+            if not symbols_needing_data_list:
+                colored_log(self.logger, 'info', f"Historical data check PASSED: All {len(symbols)} symbols have complete data across all {len(intervals)} intervals", success=True)
+            else:
+                colored_log(self.logger, 'warning', f"Historical data check FAILED: {len(symbols_needing_data_list)} symbols need data loading: {symbols_needing_data_list}", success=False)
+            
+            return symbols_needing_data_list
             
         except Exception as e:
             colored_log(self.logger, 'error', f"Error checking historical data loaded: {e}", success=False)
             import traceback
             colored_log(self.logger, 'error', traceback.format_exc(), success=False)
-            return False
+            return symbols  # Return all symbols if error occurs, to be safe
 
 
     def emergency_data_recovery(self, timeframe=None, specific_symbols=None):
@@ -1190,11 +1216,7 @@ class LiveDataManager:
 
             current_time = datetime.now(IST)
             current_date = current_time.date()
-            # For 1m, we need to fetch data from last 10 minutes. Other timeframes we need to fetch data from 9:15 AM.
-            if timeframe == '1m':
-                start_time = current_time - timedelta(minutes = 10).strftime('%H:%M:%S')            
-            else:
-                start_time = current_time.replace(hour=9, minute=15, second=0, microsecond=0).strftime('%H:%M:%S')            
+            start_time = current_time.replace(hour=9, minute=15, second=0, microsecond=0).strftime('%H:%M:%S')            
             date_str = current_date.strftime("%Y-%m-%d")
             current_aligned = current_time.replace(second=0, microsecond=0)
 
@@ -1360,18 +1382,65 @@ class LiveDataManager:
     
     
     def _calculate_and_store_indicators(self, symbol, start_date, end_date, mode):
-        """Calculate and store indicators for all timeframes"""
+        """Calculate and store indicators for all timeframes - OPTIMIZED for real-time updates"""
+        try:
+            # Check if this is a real-time update (5m or 15m mode) - use optimized approach
+            if mode in ['5m', '15m']:
+                self._calculate_indicators_incremental(symbol, mode)
+            else:
+                # Full calculation for initial load or post_fetch mode
+                self._calculate_indicators_full(symbol, start_date, end_date, mode)
+                    
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error calculating indicators for {symbol}: {e}", success=False)
+
+    def _calculate_indicators_incremental(self, symbol, timeframe):
+        """Calculate indicators only for the latest candle - OPTIMIZED for real-time"""
+        try:
+            # Get minimal historical data needed for indicator calculations
+            if timeframe == '15m':
+                lookback_days = 20
+            elif timeframe == '5m':
+                lookback_days = 10
+            else:
+                lookback_days = 1
+
+            end_date = datetime.now(IST).date()
+            start_date = end_date - timedelta(days=lookback_days)
+            
+            # Fetch only necessary data
+            df_current = self.fetch_lookback_data(start_date, end_date, timeframe, symbol)
+            df_daily = self.fetch_lookback_data(end_date - timedelta(days=20), end_date, 'd', symbol)
+            df_nifty_15m = self.fetch_lookback_data(end_date - timedelta(days=20), end_date, 'nifty_15m', 'NIFTY')
+            
+            if df_current.empty or df_daily.empty or df_nifty_15m.empty:
+                colored_log(self.logger, 'warning', f"Missing data for incremental indicator calculation: {symbol} {timeframe}", success=False)
+                return
+            
+            # Calculate indicators for the full dataset (needed for rolling/ewm calculations)
+            df_with_indicators = self._calculate_indicators_for_timeframe(df_current, df_daily, df_nifty_15m, symbol, timeframe)
+            
+            if not df_with_indicators.empty:
+                # Only update the database with the LATEST record (most recent candle)
+                latest_record = df_with_indicators.tail(1).copy()
+                self._update_indicators_in_db(latest_record, symbol, timeframe)
+                colored_log(self.logger, 'debug', f"Updated indicators for latest {timeframe} candle: {symbol}", success=True)
+            
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error in incremental indicator calculation for {symbol} {timeframe}: {e}", success=False)
+
+    def _calculate_indicators_full(self, symbol, start_date, end_date, mode):
+        """Full indicator calculation for initial loads - ORIGINAL APPROACH"""
         try:                       
             df_all_dict  = {
             '15m': self.fetch_lookback_data(end_date- timedelta(days=20), end_date, '15m', symbol),
             '5m': self.fetch_lookback_data(end_date- timedelta(days=10), end_date, '5m', symbol),
             '1m': self.fetch_lookback_data(end_date- timedelta(days=1) , end_date, '1m', symbol),
-            'd': self.fetch_lookback_data(start_date, end_date, 'd', symbol),
-            'nifty_15m': self.fetch_lookback_data(start_date, end_date, 'nifty_15m', 'NIFTY'),
+            'd': self.fetch_lookback_data(start_date - timedelta(days=20), end_date, 'd', symbol),
+            'nifty_15m': self.fetch_lookback_data(start_date - timedelta(days=20), end_date, 'nifty_15m', 'NIFTY'),
             }
 
             # Calculate indicators
-            # === STEP 2: Calculate all indicators once ===
             try:
                 symbol_data_with_indicators = self.calculate_all_indicators_once(df_all_dict, symbol)
             except Exception as e:
@@ -1390,10 +1459,281 @@ class LiveDataManager:
         except Exception as e:
             colored_log(self.logger, 'error', f"Error calculating indicators for {symbol}: {e}", success=False)
 
+    def _calculate_indicators_for_timeframe(self, df_current, df_daily, df_nifty_15m, symbol, timeframe):
+        """Calculate indicators for a specific timeframe - optimized for latest candle updates"""
+        try:
+            # Ensure time columns are datetime
+            for df in [df_current, df_daily, df_nifty_15m]:
+                if not df.empty:
+                    df['time'] = pd.to_datetime(df['time'])
+            
+            # Calculate daily indicators (needed for merging)
+            if not df_daily.empty:
+                df_daily['prev_close'] = df_daily['close'].shift(1)
+                df_daily['tr1'] = df_daily['high'] - df_daily['low']
+                df_daily['tr2'] = abs(df_daily['high'] - df_daily['prev_close'])
+                df_daily['tr3'] = abs(df_daily['low'] - df_daily['prev_close'])
+                df_daily['tr'] = df_daily[['tr1', 'tr2', 'tr3']].max(axis=1)
+                df_daily['atr_10'] = df_daily['tr'].ewm(span=10, adjust=False).mean()
+                df_daily['volume_10'] = df_daily['volume'].rolling(window=10).mean()
+                df_daily['close_10'] = df_daily['close'].rolling(window=10).mean()
+                df_daily['date'] = df_daily['time'].dt.date
+
+            # Calculate nifty 15m indicators (needed for merging)
+            if not df_nifty_15m.empty:
+                df_nifty_15m['date'] = df_nifty_15m['time'].dt.date
+                df_nifty_15m['nifty_15m_ema_50'] = df_nifty_15m['close'].ewm(span=50, adjust=False).mean()
+                df_nifty_15m['nifty_15m_ema_200'] = df_nifty_15m['close'].ewm(span=200, adjust=False).mean()
+                df_nifty_15m['nifty_15m_adx'] = talib.ADX(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+                df_nifty_15m['nifty_15m_+DI'] = talib.PLUS_DI(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+                df_nifty_15m['nifty_15m_-DI'] = talib.MINUS_DI(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+                df_nifty_15m['nifty_15m_MACD'], df_nifty_15m['nifty_15m_MACD_Signal'], _ = talib.MACD(df_nifty_15m['close'], fastperiod=20, slowperiod=50, signalperiod=10)
+                df_nifty_15m['nifty_trend_15m'] = df_nifty_15m.apply(self.classify_trend, args=('15m',), axis=1)
+                df_nifty_15m = df_nifty_15m.groupby('date').last().reset_index()
+                df_nifty_15m['nifty_trend_15m'] = df_nifty_15m['nifty_trend_15m'].shift(1)
+            
+            # Calculate current timeframe indicators
+            if not df_current.empty:
+                df_current['date'] = df_current['time'].dt.date
+                
+                if timeframe == '5m':
+                    for period in [50, 100, 200]:
+                        df_current[f'ema_{period}'] = df_current['close'].ewm(span=period, adjust=False).mean()
+                    # Only keep today's date before calculating single prints
+                    df_current = df_current[df_current['date'] == datetime.now(IST).date()].reset_index(drop=True)
+                    # Calculate range
+                    df_current['range'] = df_current['high'] - df_current['low']
+                    df_current['avg_range_all'] = df_current.groupby('date')['range'].expanding().mean().reset_index(level=0, drop=True)
+                    try:
+                        avg_ex_first_30min_5m = df_current.groupby('date').apply(self.exclude_first_30min)
+                        if isinstance(avg_ex_first_30min_5m, pd.DataFrame):
+                            avg_ex_first_30min_5m = avg_ex_first_30min_5m.iloc[:, 0]
+                        avg_ex_first_30min_5m = avg_ex_first_30min_5m.reset_index(level=0, drop=True)
+                        df_current['avg_range_ex_first_30min'] = avg_ex_first_30min_5m.reindex(df_current.index).ffill()
+                    except Exception as e:
+                        self.logger.warning(f"Error calculating avg_range_ex_first_30min for 5m: {e}, using avg_range_all instead")
+                        df_current['avg_range_ex_first_30min'] = df_current['avg_range_all']
+                    df_current['is_range_bullish'] = (
+                        (df_current['range'] > 0.7 * df_current['avg_range_ex_first_30min']) & 
+                        (df_current['close'] > df_current['open']) & 
+                        (df_current['close'] > (((df_current['high'] - df_current['open']) * 0.5) + df_current['open']))
+                    )
+                    df_current['is_range_bearish'] = (
+                        (df_current['range'] > 0.7 * df_current['avg_range_ex_first_30min']) & 
+                        (df_current['close'] < df_current['open']) & 
+                        (df_current['close'] < (((df_current['open'] - df_current['low']) * 0.5) + df_current['low']))
+                    )                   
+            
+                if timeframe == '15m':
+                    df_current = self._calculate_zlema_macd(df_current)
+                    # Only keep today's date before calculating single prints
+                    df_current = df_current[df_current['date'] == datetime.now(IST).date()].reset_index(drop=True)
+
+                # Calculate single prints
+                df_current['is_first_bullish_confirmed'] = False
+                df_current['is_first_bearish_confirmed'] = False
+                df_current['candle_count'] = df_current.groupby(df_current['date']).cumcount() + 1
+                df_current['cum_high_prev'] = df_current.groupby('date')['high'].expanding().max().shift(1).reset_index(level=0, drop=True)
+                df_current['cum_low_prev'] = df_current.groupby('date')['low'].expanding().min().shift(1).reset_index(level=0, drop=True)
+                df_current['cum_high'] = df_current.groupby('date')['high'].expanding().max().reset_index(level=0, drop=True)
+                df_current['cum_low'] = df_current.groupby('date')['low'].expanding().min().reset_index(level=0, drop=True)
+                df_current['sp_confirmed_bullish'] = (
+                    (df_current['close'] > df_current['cum_high_prev']) & 
+                    (df_current['close'] > df_current['open']) & 
+                    (df_current['candle_count'] >= 2)
+                )
+                df_current['sp_confirmed_bearish'] = (
+                    (df_current['close'] < df_current['cum_low_prev']) & 
+                    (df_current['close'] < df_current['open']) & 
+                    (df_current['candle_count'] >= 2)
+                )
+                
+                # Mark first confirmations
+                bullish_conf = df_current[df_current['sp_confirmed_bullish']]
+                bearish_conf = df_current[df_current['sp_confirmed_bearish']]
+                first_bullish_idx = bullish_conf.groupby('date').head(1).index
+                first_bearish_idx = bearish_conf.groupby('date').head(1).index
+                df_current.loc[first_bullish_idx, 'is_first_bullish_confirmed'] = True
+                df_current.loc[first_bearish_idx, 'is_first_bearish_confirmed'] = True
+                
+                # SP levels
+                sp_levels_bullish = df_current[df_current['is_first_bullish_confirmed']][['date', 'close', 'cum_high_prev']]
+                sp_levels_bearish = df_current[df_current['is_first_bearish_confirmed']][['date', 'close', 'cum_low_prev']]
+                sp_levels_bullish['sp_high_bullish'] = sp_levels_bullish['close']
+                sp_levels_bullish['sp_low_bullish'] = sp_levels_bullish['cum_high_prev']
+                sp_levels_bearish['sp_high_bearish'] = sp_levels_bearish['cum_low_prev']
+                sp_levels_bearish['sp_low_bearish'] = sp_levels_bearish['close']
+                sp_levels_bullish.drop(['close', 'cum_high_prev'], axis=1, inplace=True)
+                sp_levels_bearish.drop(['close', 'cum_low_prev'], axis=1, inplace=True)
+                
+                # Merge back
+                df_current = df_current.merge(sp_levels_bullish, on='date', how='left')
+                df_current = df_current.merge(sp_levels_bearish, on='date', how='left')
+                
+                # Forward fill SP levels
+                df_current['sp_high_bullish'] = df_current.groupby('date')['sp_high_bullish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+                df_current['sp_low_bullish'] = df_current.groupby('date')['sp_low_bullish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+                df_current['sp_high_bearish'] = df_current.groupby('date')['sp_high_bearish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+                df_current['sp_low_bearish'] = df_current.groupby('date')['sp_low_bearish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+                
+                # Set pre-confirmation values to NaN
+                df_current.loc[~df_current['sp_confirmed_bullish'].cummax(), ['sp_high_bullish', 'sp_low_bullish']] = None
+                df_current.loc[~df_current['sp_confirmed_bearish'].cummax(), ['sp_high_bearish', 'sp_low_bearish']] = None
+                
+                # Calculate SP range percentages
+                df_current['sp_bullish_range_pct'] = (df_current['sp_high_bullish'] - df_current['sp_low_bullish']) / df_current['sp_low_bullish'] * 100
+                df_current['sp_bearish_range_pct'] = (df_current['sp_high_bearish'] - df_current['sp_low_bearish']) / df_current['sp_low_bearish'] * 100
+                df_current['cum_sp_bullish'] = df_current.groupby('date')['sp_confirmed_bullish'].cumsum()
+                df_current['cum_sp_bearish'] = df_current.groupby('date')['sp_confirmed_bearish'].cumsum()
+
+                # VOLUME AND RANGE CALCULATIONS
+                df_current['cum_intraday_volume'] = df_current.groupby('date')['volume'].cumsum()
+                df_current['curtop'] = df_current.groupby('date')['high'].cummax()
+                df_current['curbot'] = df_current.groupby('date')['low'].cummin()
+                df_current['today_range'] = df_current['curtop'] - df_current['curbot']
+                df_current['today_range_pct_10'] = df_current['today_range'] / df_current['atr_10']
+                df_current['volume_range_pct_10'] = (df_current['cum_intraday_volume'] / df_current['volume_10']) / df_current['today_range_pct_10']
+                
+                # Merge with daily data
+                if not df_daily.empty:
+                    daily_cols = ['date', 'atr_10', 'volume_10', 'close_10']
+                    df_current = df_current.merge(df_daily[daily_cols], on='date', how='left')
+
+                # Merge with nifty 15m data
+                if not df_nifty_15m.empty:
+                    df_current = df_current.merge(df_nifty_15m[['date', 'nifty_trend_15m']], on='date', how='left')
+                
+                # STRATEGY DEFINITIONS
+                df_current['s_8'] = (
+                    (df_current['time'].dt.time >= time(4, 0)) & 
+                    (df_current['time'].dt.time < time(8, 15)) & 
+                    (df_current['cum_sp_bullish'] >= 1) & 
+                    (df_current['sp_bullish_range_pct'] > 0.8) & 
+                    (df_current['sp_bullish_range_pct'] < 1.3) & 
+                    (df_current['zl_macd_signal'] == -1) & 
+                    (df_current['volume_range_pct_10'] > 1) &
+                    (df_current['atr_10'] / df_current['close_10'] < 0.04) &
+                    (df_current['nifty_trend_15m'] >= 0)
+                )
+                df_current['strategy_8'] = False
+                first_true_idx_8 = df_current[df_current['s_8']].groupby('date').head(1).index
+                df_current.loc[first_true_idx_8, 'strategy_8'] = True
+                
+                df_current['s_12'] = (
+                    (df_current['time'].dt.time >= time(4, 0)) & 
+                    (df_current['time'].dt.time < time(8, 15)) & 
+                    (df_current['cum_sp_bearish'] >= 1) & 
+                    (df_current['sp_bearish_range_pct'] > 1) & 
+                    (df_current['zl_macd_signal'] == 1) &
+                    (df_current['volume_range_pct_10'] > 0) &
+                    (df_current['volume_range_pct_10'] < 0.4) &
+                    (df_current['atr_10'] / df_current['close_10'] < 0.04) &
+                    (df_current['nifty_trend_15m'] <= 0)
+                )
+                df_current['strategy_12'] = False
+                first_true_idx_12 = df_current[df_current['s_12']].groupby('date').head(1).index
+                df_current.loc[first_true_idx_12, 'strategy_12'] = True                
+                
+                # Strategy 10 & 11 (5m)
+                df_current['s_10'] = (
+                    (df_current['time'].dt.time >= time(3, 50)) & 
+                    (df_current['time'].dt.time < time(8, 15)) & 
+                    (df_current['cum_sp_bearish'] >= 1) & 
+                    (df_current['sp_bearish_range_pct'] > 0.6) & 
+                    (df_current['close'] < df_current['ema_50']) & 
+                    (df_current['close'] < df_current['ema_100']) & 
+                    (df_current['close'] < df_current['ema_200']) & 
+                    (df_current['is_range_bearish']) & 
+                    (df_current['volume_range_pct_10'] > 0.3) & 
+                    (df_current['volume_range_pct_10'] < 0.7) & 
+                    (df_current['atr_10'] / df_current['close_10'] > 0.04) &            
+                    (df_current['nifty_trend_15m'] != 1)
+                )
+                df_current['strategy_10'] = False
+                first_true_idx_10 = df_current[df_current['s_10']].groupby('date').head(1).index
+                df_current.loc[first_true_idx_10, 'strategy_10'] = True
+                
+                df_current['s_11'] = (
+                    (df_current['time'].dt.time >= time(3, 50)) & 
+                    (df_current['time'].dt.time < time(8, 15)) & 
+                    (df_current['cum_sp_bullish'] >= 1) & 
+                    (df_current['sp_bullish_range_pct'] > 0.8) & 
+                    (df_current['close'] > df_current['ema_50']) & 
+                    (df_current['close'] > df_current['ema_100']) & 
+                    (df_current['close'] > df_current['ema_200']) & 
+                    (df_current['is_range_bullish']) & 
+                    (df_current['volume_range_pct_10'] > 0) & 
+                    (df_current['volume_range_pct_10'] < 0.3) &
+                    (df_current['atr_10'] / df_current['close_10'] > 0.04) &
+                    (df_current['nifty_trend_15m'] != -1)
+                )
+                df_current['strategy_11'] = False
+                first_true_idx_11 = df_current[df_current['s_11']].groupby('date').head(1).index
+                df_current.loc[first_true_idx_11, 'strategy_11'] = True
+
+                df_current['s_9'] = (
+                    (df_current['time'].dt.time >= time(3, 50)) & 
+                    (df_current['time'].dt.time < time(8, 15)) & 
+                    (df_current['cum_sp_bullish'] >= 1) & 
+                    (df_current['sp_bullish_range_pct'] > 0.8) & 
+                    (df_current['close'] > df_current['ema_50']) & 
+                    (df_current['close'] > df_current['ema_100']) & 
+                    (df_current['close'] > df_current['ema_200']) & 
+                    (df_current['is_range_bullish']) & 
+                    (df_current['volume_range_pct_10'] > 0.3) & 
+                    (df_current['volume_range_pct_10'] < 0.6) &
+                    (df_current['atr_10'] / df_current['close_10'] < 0.04) &
+                    (df_current['nifty_trend_15m'] != 1)
+                )
+                df_current['strategy_9'] = False
+                first_true_idx_9 = df_current[df_current['s_9']].groupby('date').head(1).index
+                df_current.loc[first_true_idx_9, 'strategy_9'] = True
+
+                # Clean up temporary columns
+                df_current.drop(['date'], axis=1, inplace=True, errors='ignore')
+            
+            return df_current
+            
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error calculating indicators for {symbol} {timeframe}: {e}", success=False)
+            return df_current  # Return original dataframe on error
+
+    def _calculate_zlema_macd(self, df):
+        """Calculate Zero-Lag EMA MACD indicators"""
+        try:
+            if len(df) < 50:  # Need minimum data for MACD
+                return df           
+            
+            # Calculate ZLEMA MACD
+            df['fast_zlema'] = self.zero_lag_ema(df['close'], 12)
+            df['slow_zlema'] = self.zero_lag_ema(df['close'], 26)
+            df['zl_macd'] = df['fast_zlema'] - df['slow_zlema']
+            df['zl_signal'] = df['zl_macd'].ewm(span=9, adjust=False).mean()
+            df['zl_hist'] = df['zl_macd'] - df['zl_signal']
+            
+            # Generate MACD Signals
+            df['zl_macd_signal'] = 0
+            df.loc[(df['zl_macd'] > df['zl_signal']) & 
+                    (df['zl_macd'].shift(1) <= df['zl_signal'].shift(1)), 'zl_macd_signal'] = 1
+            df.loc[(df['zl_macd'] < df['zl_signal']) & 
+                    (df['zl_macd'].shift(1) >= df['zl_signal'].shift(1)), 'zl_macd_signal'] = -1
+            df.drop(['fast_zlema', 'slow_zlema', 'zl_macd', 'zl_signal', 'zl_hist'], axis=1, inplace=True)
+            return df
+            
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error calculating ZLEMA MACD: {e}", success=False)
+            return df
 
     def fetch_lookback_data(self, start_day, end_day, interval, symbol):
         
         #colored_log(self.logger, 'info', f"Fetching lookback data from {start_day} to {end_day}", success=True)
+        
+        # Get symbols with active positions for 1m data (used for exit signals)
+        active_symbols = self.get_active_symbols() if self.get_active_symbols else []
+        if interval == '1m' and symbol not in active_symbols:
+            colored_log(self.logger, 'debug', f"[{symbol}] No active positions - skipping 1m data lookback fetch", success=True)
+            return pd.DataFrame()
+
         if interval == "nifty_15m":
             interval = "15m"
 
@@ -1910,7 +2250,7 @@ class LiveDataManager:
             
             cursor = self.db_conn.cursor()            
             
-            indicator_columns = ['atr_10', 'volume_10', 'atr_14', 'volume_14', 'nifty_trend_15m', 'curbot', 'curtop', 'cum_intraday_volume', 'strategy_8', 'strategy_9', 'strategy_10', 'strategy_11', 'strategy_12']
+            indicator_columns = ['atr_10', 'volume_10', 'nifty_trend_15m', 'curbot', 'curtop', 'cum_intraday_volume', 'strategy_8', 'strategy_9', 'strategy_10', 'strategy_11', 'strategy_12']
             
             for _, row in df.iterrows():
                 # Build update query for available indicators
@@ -2000,33 +2340,36 @@ class LiveDataManager:
                         if 'timeout' in str(df.get('message', '')).lower():
                             if attempt < max_retries - 1:
                                 wait_time = (2 ** attempt) + random.uniform(0, 1)  # Exponential backoff
-                                colored_log(self.logger, 'warning', f"[{symbol}] ⏳ Timeout on attempt {attempt + 1}, retrying in {wait_time:.1f}s...", success=False)
+                                colored_log(self.logger, 'warning', f"[{symbol}] Timeout on attempt {attempt + 1}, retrying in {wait_time:.1f}s...", success=False)
                                 time_module.sleep(wait_time)
                                 continue
                         colored_log(self.logger, 'warning', f"[{symbol}] API Response error! No data on {start_date}", success=False)
                         colored_log(self.logger, 'info', f"API Response: {df}", success=True)
+                        # Remove the symbol from the symbols list
+                        self.symbols.remove(symbol)
+                        colored_log(self.logger, 'info', f"[{symbol}] Removed from symbols list", success=True)
                         return  # Exit function
                     
                     # Success - process the dataframe
                     if hasattr(df, 'empty') and not df.empty:
                         self.insert_historical_data(df, symbol, interval, mode)
                     else:
-                        colored_log(self.logger, 'warning', f"[{symbol}] ⚠️ Empty Dataframe! No data on {start_date}", success=False)
+                        colored_log(self.logger, 'warning', f"[{symbol}] Empty Dataframe! No data on {start_date}", success=False)
                     return  # Exit function on success
                     
                 except Exception as retry_e:
                     if attempt < max_retries - 1:
                         wait_time = (2 ** attempt) + random.uniform(0, 1)
-                        colored_log(self.logger, 'warning', f"[{symbol}] ⏳ Error on attempt {attempt + 1}: {retry_e}, retrying in {wait_time:.1f}s...", success=False)
+                        colored_log(self.logger, 'warning', f"[{symbol}] Error on attempt {attempt + 1}: {retry_e}, retrying in {wait_time:.1f}s...", success=False)
                         time_module.sleep(wait_time)
                     else:
-                        colored_log(self.logger, 'error', f"[{symbol}] ❌ Failed after {max_retries} attempts: {retry_e}", success=False)
+                        colored_log(self.logger, 'error', f"[{symbol}] Failed after {max_retries} attempts: {retry_e}", success=False)
             
             # Add delay between requests to reduce server load
             time_module.sleep(random.uniform(0.1, 0.3))
 
         except Exception as e:
-            colored_log(self.logger, 'error', f"[{symbol}] ❌ Error during fetch: {e}", success=False)
+            colored_log(self.logger, 'error', f"[{symbol}] Error during fetch: {e}", success=False)
 
     def fetch_intraday_data(self, symbol, interval, client, start_date, end_date, start_time, end_time, mode):
         try:
@@ -2251,7 +2594,7 @@ class LiveDataManager:
     
     def _real_time_data_loop(self):
         """Main loop for processing real-time tick data using TimescaleDB's message processing"""
-        heartbeat_check_interval = 90  # Changed to 90 seconds for all timeframes
+        heartbeat_check_interval = 120  # Changed to 120 seconds for all timeframes
         last_heartbeat_check = time_module.time()
         colored_log(self.logger, 'info', "Starting real-time data monitoring (30s interval)", success=True)
 
@@ -2312,18 +2655,25 @@ class LiveDataManager:
                         return True
                     return False
 
-                # Fetch 1-min data
+                # Fetch 1-min data - only for symbols with active positions (optimization)
                 if should_fetch('1m', 1):
                     start_time = (current_time - timedelta(minutes=2)).time().strftime('%H:%M:%S') # 2 minutes buffer
                     end_time = (current_time + timedelta(minutes=1)).time().strftime('%H:%M:%S')
                     #nd_time = current_time.time().strftime('%H:%M:%S')
                     
-                       
-                    date_str = current_date.strftime('%Y-%m-%d')
-                    for symbol in self.symbols:
-                        self.fetch_intraday_data(symbol, '1m', self.api_client, date_str, date_str, start_time, end_time, 'recovery')
-                        self.on_new_candle(symbol, '1m', current_time.time())
-                    colored_log(self.logger, 'info', f"Loaded 1-min data for all symbols. Latest data time: {end_time}", success=True)
+                    # Get symbols with active positions for 1m data (used for exit signals)
+                    active_symbols = self.get_active_symbols() if self.get_active_symbols else []
+
+                    colored_log(self.logger, 'info', f"Fetching 1m data for active symbols: {active_symbols}", success=True)
+                    
+                    if active_symbols:
+                        date_str = current_date.strftime('%Y-%m-%d')
+                        for symbol in active_symbols:
+                            self.fetch_intraday_data(symbol, '1m', self.api_client, date_str, date_str, start_time, end_time, 'recovery')
+                            self.on_new_candle(symbol, '1m', current_time.time())
+                        colored_log(self.logger, 'info', f"Loaded 1-min data for {len(active_symbols)} active position symbols: {active_symbols}", success=True)
+                    else:
+                        colored_log(self.logger, 'debug', "No active positions - skipping 1m data fetch", success=True)
 
                 # Fetch 5-min data
                 if should_fetch('5m', 5):
@@ -2331,11 +2681,10 @@ class LiveDataManager:
                     #end_time = (current_time + timedelta(minutes=5)).time().strftime('%H:%M:%S')
                     end_time = current_time.time().strftime('%H:%M:%S')
 
+                    colored_log(self.logger, 'info', f"Fetching 5m data for {len(self.symbols)} symbols in parallel. Current time: {current_time.time()}", success=True)
                     
                     date_str = current_date.strftime('%Y-%m-%d')
-                    for symbol in self.symbols:
-                        self.fetch_intraday_data(symbol, '5m', self.api_client, date_str, date_str, start_time, end_time, 'recovery')
-                        self.on_new_candle(symbol, '5m', current_time.time())
+                    self._fetch_data_parallel(self.symbols, '5m', date_str, start_time, end_time, current_time.time())
                     colored_log(self.logger, 'info', "Loaded 5-min data for all symbols", success=True)                    
 
                 # Fetch 15-min data
@@ -2343,16 +2692,52 @@ class LiveDataManager:
                     start_time = (current_time - timedelta(minutes=16)).time().strftime('%H:%M:%S') # 16 minutes buffer
                     #end_time = (current_time + timedelta(minutes=15)).time().strftime('%H:%M:%S')
                     end_time = current_time.time().strftime('%H:%M:%S')
+
+                    colored_log(self.logger, 'info', f"Fetching 15m data for {len(self.symbols)} symbols in parallel. Current time: {current_time.time()}", success=True)
                     
                     date_str = current_date.strftime('%Y-%m-%d')
-                    for symbol in self.symbols:
-                        self.fetch_intraday_data(symbol, '15m', self.api_client, date_str, date_str, start_time, end_time, 'recovery')
-                        self.on_new_candle(symbol, '15m', current_time.time())
+                    self._fetch_data_parallel(self.symbols, '15m', date_str, start_time, end_time, current_time.time())
                     colored_log(self.logger, 'info', "Loaded 15-min data for all symbols", success=True)
 
         except Exception as e:
             colored_log(self.logger, 'error', f"Error in non-blocking message processing: {e}", success=False)
 
+    def _fetch_data_parallel(self, symbols, interval, date_str, start_time, end_time, current_candle_time):
+        """Fetch data for multiple symbols in parallel to improve performance"""
+        import time as time_module
+        
+        def fetch_single_symbol(symbol):
+            """Fetch data for a single symbol and process new candle"""
+            try:
+                self.fetch_intraday_data(symbol, interval, self.api_client, date_str, date_str, start_time, end_time, 'recovery')
+                self.on_new_candle(symbol, interval, current_candle_time)
+                return f"✅ {symbol}"
+            except Exception as e:
+                colored_log(self.logger, 'error', f"Error fetching {interval} data for {symbol}: {e}", success=False)
+                return f"❌ {symbol}: {e}"
+        
+        start_parallel_time = time_module.time()
+        
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=8) as executor:  # Limit concurrent requests
+            futures = {executor.submit(fetch_single_symbol, symbol): symbol for symbol in symbols}
+            results = []
+            
+            for future in futures:
+                try:
+                    result = future.result(timeout=30)  # 30 second timeout per symbol
+                    results.append(result)
+                except Exception as e:
+                    symbol = futures[future]
+                    colored_log(self.logger, 'error', f"Timeout/Error for {symbol} {interval}: {e}", success=False)
+                    results.append(f"❌ {symbol}: timeout/error")
+        
+        parallel_time = time_module.time() - start_parallel_time
+        successful_fetches = len([r for r in results if r.startswith('✅')])
+        
+        colored_log(self.logger, 'info', 
+                  f"Parallel {interval} fetch completed: {successful_fetches}/{len(symbols)} symbols in {parallel_time:.2f}s", 
+                  success=True)
        
     def _process_messages_non_blocking_(self):
         """Process messages non-blocking way using TimescaleDB's consumer"""
@@ -2860,11 +3245,14 @@ class LiveTradingEngine:
 
         # Components
         self.position_manager = PositionManager(self.api_client, self.sl_pct, self.tp_pct, self.trail_activation_pct, self.trail_stop_gap_pct, self.trail_increment_pct, self.trading_start, self.trading_end, self.max_open_positions, self.max_daily_trades, self.max_strategy_trades_per_day)
-        self.data_manager = LiveDataManager(db_config, self.api_client, self.api_key, self.symbols, self.market_start, self.market_end)
+        self.data_manager = LiveDataManager(db_config, self.api_client, self.api_key, self.symbols, self.market_start, self.market_end, self.get_active_symbols)
         self.order_manager = OrderManager(self.api_client)    
         
         colored_log(self.logger, 'info', f"LiveTradingEngine initialized for {len(symbols)} symbols", success=True)
     
+    def get_active_symbols(self):
+        """Return list of symbols with active positions"""
+        return list(self.position_manager.open_positions.keys()) if self.position_manager and self.position_manager.open_positions else []
         
     def is_market_hours(self):
         """Check if market is open"""

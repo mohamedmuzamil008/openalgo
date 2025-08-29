@@ -181,8 +181,8 @@ def main():
 
                 status = engine.get_status()
                 
-                # Log status every 5 minutes
-                if datetime.now().minute % 5 == 0 and datetime.now().second < 5:
+                # Log status every 1 minute
+                if datetime.now().minute % 1 == 0 and datetime.now().second < 5:
                     logger.info(f" STATUS: Positions: {status['open_positions']} | "
                                f"Daily Trades: {status['daily_trades']} | "
                                f"Market: {'OPEN' if status['market_hours'] else 'CLOSED'} | "
