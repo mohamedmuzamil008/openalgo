@@ -214,6 +214,53 @@ class BacktestEngine:
             return 0
         else:
             return 0
+
+    def compute_volume_range_pct_vectorized(df, atr_10d, avg_daily_vol_10d):
+        """
+        Vectorized computation of intraday-adjusted volume_range_pct.
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Must have ['time', 'open', 'high', 'low', 'close', 'volume'].
+            'time' must be a pandas datetime (timestamp).
+            Multiple days allowed.
+        atr_10d : float
+            Average True Range of last 10 days (daily).
+        avg_daily_vol_10d : float
+            Average daily volume of last 10 days.
+        """
+
+        df = df.copy().sort_values('time')
+
+        # --- 1. Extract calendar date and intraday time-of-day key ---
+        df['date'] = df['time'].dt.date
+        df['tod'] = df['time'].dt.time   # or .dt.strftime("%H:%M") for minute resolution
+
+        # --- 2. Build intraday volume profile (expected curve) ---
+        vol_profile = (
+            df.groupby(['tod', 'date'])['volume'].sum()   # vol per bar per day
+            .groupby('tod').mean()                      # mean across days
+        )
+        vol_profile = vol_profile / vol_profile.sum()
+        vol_profile_cum = vol_profile.cumsum()
+
+        # Map expected cumulative volume
+        df['expected_cum_vol'] = avg_daily_vol_10d * df['tod'].map(vol_profile_cum)
+
+        # --- 3. Per-day cumulative stats ---
+        df['cum_vol'] = df.groupby('date')['volume'].cumsum()
+        df['cum_high'] = df.groupby('date')['high'].cummax()
+        df['cum_low'] = df.groupby('date')['low'].cummin()
+        df['intraday_range'] = df['cum_high'] - df['cum_low']
+
+        # --- 4. Normalized ratios ---
+        df['adj_vol'] = df['cum_vol'] / df['expected_cum_vol']
+        df['adj_range'] = df['intraday_range'] / atr_10d
+        df['volume_range_pct_adj'] = df['adj_vol'] / df['adj_range']
+
+        return df
+
         
     def calculate_all_indicators_once(self, df_all_dict):
         """
@@ -250,18 +297,24 @@ class BacktestEngine:
         atr_period = 14
         volume_period = 14
         df_daily['prev_close'] = df_daily['close'].shift(1)
-        df_daily['tr1'] = df_daily['high'] - df_daily['low']
-        df_daily['tr2'] = abs(df_daily['high'] - df_daily['prev_close'])
-        df_daily['tr3'] = abs(df_daily['low'] - df_daily['prev_close'])
+        df_daily['tr1'] = df_daily['high'].shift(1) - df_daily['low'].shift(1)
+        df_daily['tr2'] = abs(df_daily['high'].shift(1) - df_daily['prev_close'].shift(1))
+        df_daily['tr3'] = abs(df_daily['low'].shift(1) - df_daily['prev_close'].shift(1))
         df_daily['tr'] = df_daily[['tr1', 'tr2', 'tr3']].max(axis=1)
         df_daily['atr_10'] = df_daily['tr'].ewm(span=10, adjust=False).mean()
         df_daily['volume_10'] = df_daily['volume'].rolling(window=10).mean()
+        df_daily['volume_10'] = df_daily['volume_10'].shift(1)
         df_daily['atr_14'] = df_daily['tr'].ewm(span=14, adjust=False).mean()
         df_daily['volume_14'] = df_daily['volume'].rolling(window=14).mean()
+        df_daily['volume_14'] = df_daily['volume_14'].shift(1)
         df_daily['close_10'] = df_daily['close'].rolling(window=10).mean()
+        df_daily['close_10'] = df_daily['close_10'].shift(1)
         df_daily['close_14'] = df_daily['close'].rolling(window=14).mean()
+        df_daily['close_14'] = df_daily['close_14'].shift(1)
         df_daily['rsi_14'] = talib.RSI(df_daily['close'], timeperiod=14)
+        df_daily['rsi_14'] = df_daily['rsi_14'].shift(1)
         df_daily['adx_14'] = talib.ADX(df_daily['high'], df_daily['low'], df_daily['close'], timeperiod=14)
+        df_daily['adx_14'] = df_daily['adx_14'].shift(1)
         df_daily.drop(['prev_close', 'tr1', 'tr2', 'tr3', 'tr'], axis=1, inplace=True)
         
         # Add date columns for merging
@@ -393,13 +446,25 @@ class BacktestEngine:
         except Exception as e:
             self.logger.warning(f"Error calculating avg_range_ex_first_30min for 5m: {e}, using avg_range_all instead")
             df_5m['avg_range_ex_first_30min'] = df_5m['avg_range_all']
+        
+        # Create a mask for first 30 minutes (3:45 to 4:15 UTC)
+        first_30min_mask_5m = (
+            (df_5m['time'].dt.time >= time(3, 45)) & 
+            (df_5m['time'].dt.time < time(4, 15))
+        )
+        
+        # For first 30 minutes, use rolling average of today's ranges
+        # For after 30 minutes, use avg_range_ex_first_30min
+        avg_range_for_comparison_5m = df_5m['avg_range_ex_first_30min'].copy()
+        avg_range_for_comparison_5m.loc[first_30min_mask_5m] = df_5m.loc[first_30min_mask_5m, 'avg_range_all']
+        
         df_5m['is_range_bullish'] = (
-            (df_5m['range'] > 0.7 * df_5m['avg_range_ex_first_30min']) & 
+            (df_5m['range'] > 0.7 * avg_range_for_comparison_5m) & 
             (df_5m['close'] > df_5m['open']) & 
             (df_5m['close'] > (((df_5m['high'] - df_5m['open']) * 0.5) + df_5m['open']))
         )
         df_5m['is_range_bearish'] = (
-            (df_5m['range'] > 0.7 * df_5m['avg_range_ex_first_30min']) & 
+            (df_5m['range'] > 0.7 * avg_range_for_comparison_5m) & 
             (df_5m['close'] < df_5m['open']) & 
             (df_5m['close'] < (((df_5m['open'] - df_5m['low']) * 0.5) + df_5m['low']))
         )
@@ -534,9 +599,31 @@ class BacktestEngine:
         df_5m['sp_bearish_range_pct'] = (df_5m['sp_high_bearish'] - df_5m['sp_low_bearish']) / df_5m['sp_low_bearish'] * 100
         df_5m['cum_sp_bullish'] = df_5m.groupby('date')['sp_confirmed_bullish'].cumsum()
         df_5m['cum_sp_bearish'] = df_5m.groupby('date')['sp_confirmed_bearish'].cumsum()
-        
+
         # === VOLUME & RANGE CALCULATIONS - 15m ===
         df_15m['cum_intraday_volume'] = df_15m.groupby('date')['volume'].cumsum()
+
+        # Step 1: Create a helper column for the time (without the date)
+        df_15m['time_of_day'] = df_15m['time'].dt.time
+
+        # Step 2: Group by time_of_day and calculate the 10-day rolling average of cum_intraday_volume
+        grouped_by_time = df_15m.groupby('time_of_day', group_keys=False)
+
+        # Step 3: For each group (each specific time, e.g., 03:45), 
+        # calculate the rolling average of 'cum_intraday_volume' over the last 10 rows (days),
+        # but make sure the window is closed on the left to EXCLUDE the current day.
+        df_15m['avg_cum_vol_last_10_days'] = (
+            grouped_by_time['cum_intraday_volume']
+            .apply(lambda x: x.rolling(window=10, min_periods=10, closed='left').mean())
+        )
+        df_15m['avg_cum_vol_last_14_days'] = (
+            grouped_by_time['cum_intraday_volume']
+            .apply(lambda x: x.rolling(window=14, min_periods=14, closed='left').mean())
+        )
+        # Step 4: Calculate your simple ratio
+        df_15m['volume_range_pct_10'] = df_15m['cum_intraday_volume'] / df_15m['avg_cum_vol_last_10_days']
+        df_15m['volume_range_pct_14'] = df_15m['cum_intraday_volume'] / df_15m['avg_cum_vol_last_14_days']
+
         df_15m['curtop'] = df_15m.groupby('date')['high'].cummax()
         df_15m['curbot'] = df_15m.groupby('date')['low'].cummin()
         df_15m['predicted_today_high'] = df_15m['curbot'] + df_15m['atr_10']
@@ -544,11 +631,35 @@ class BacktestEngine:
         df_15m['today_range'] = df_15m['curtop'] - df_15m['curbot']
         df_15m['today_range_pct_10'] = df_15m['today_range'] / df_15m['atr_10']
         df_15m['today_range_pct_14'] = df_15m['today_range'] / df_15m['atr_14']
-        df_15m['volume_range_pct_10'] = (df_15m['cum_intraday_volume'] / df_15m['volume_10']) / df_15m['today_range_pct_10']
-        df_15m['volume_range_pct_14'] = (df_15m['cum_intraday_volume'] / df_15m['volume_14']) / df_15m['today_range_pct_14']
+        #df_15m['volume_range_pct_10'] = (df_15m['cum_intraday_volume'] / df_15m['volume_10']) / df_15m['today_range_pct_10']
+       # df_15m['volume_range_pct_14'] = (df_15m['cum_intraday_volume'] / df_15m['volume_14']) / df_15m['today_range_pct_14']
+        df_15m['volume_range_pct_10'] = df_15m['volume_range_pct_10'] / df_15m['today_range_pct_10']
+        df_15m['volume_range_pct_14'] = df_15m['volume_range_pct_10'] / df_15m['today_range_pct_14']
         
         # === VOLUME & RANGE CALCULATIONS - 5m ===
         df_5m['cum_intraday_volume'] = df_5m.groupby('date')['volume'].cumsum()
+
+        # Step 1: Create a helper column for the time (without the date)
+        df_5m['time_of_day'] = df_5m['time'].dt.time
+
+        # Step 2: Group by time_of_day and calculate the 10-day rolling average of cum_intraday_volume
+        grouped_by_time = df_5m.groupby('time_of_day', group_keys=False)
+
+        # Step 3: For each group (each specific time, e.g., 03:45), 
+        # calculate the rolling average of 'cum_intraday_volume' over the last 10 rows (days),
+        # but make sure the window is closed on the left to EXCLUDE the current day.
+        df_5m['avg_cum_vol_last_10_days'] = (
+            grouped_by_time['cum_intraday_volume']
+            .apply(lambda x: x.rolling(window=10, min_periods=10, closed='left').mean())
+        )
+        df_5m['avg_cum_vol_last_14_days'] = (
+            grouped_by_time['cum_intraday_volume']
+            .apply(lambda x: x.rolling(window=14, min_periods=14, closed='left').mean())
+        )
+        # Step 4: Calculate your simple ratio
+        df_5m['volume_range_pct_10'] = df_5m['cum_intraday_volume'] / df_5m['avg_cum_vol_last_10_days']
+        df_5m['volume_range_pct_14'] = df_5m['cum_intraday_volume'] / df_5m['avg_cum_vol_last_14_days']
+
         df_5m['curtop'] = df_5m.groupby('date')['high'].cummax()
         df_5m['curbot'] = df_5m.groupby('date')['low'].cummin()
         df_5m['predicted_today_high'] = df_5m['curbot'] + df_5m['atr_10']
@@ -556,19 +667,22 @@ class BacktestEngine:
         df_5m['today_range'] = df_5m['curtop'] - df_5m['curbot']
         df_5m['today_range_pct_10'] = df_5m['today_range'] / df_5m['atr_10']
         df_5m['today_range_pct_14'] = df_5m['today_range'] / df_5m['atr_14']
-        df_5m['volume_range_pct_10'] = (df_5m['cum_intraday_volume'] / df_5m['volume_10']) / df_5m['today_range_pct_10']
-        df_5m['volume_range_pct_14'] = (df_5m['cum_intraday_volume'] / df_5m['volume_14']) / df_5m['today_range_pct_14']
-        
+        #df_5m['volume_range_pct_10'] = (df_5m['cum_intraday_volume'] / df_5m['volume_10']) / df_5m['today_range_pct_10']
+        #df_5m['volume_range_pct_14'] = (df_5m['cum_intraday_volume'] / df_5m['volume_14']) / df_5m['today_range_pct_14']
+        df_5m['volume_range_pct_10'] = df_5m['volume_range_pct_10'] / df_5m['today_range_pct_10']
+        df_5m['volume_range_pct_14'] = df_5m['volume_range_pct_14'] / df_5m['today_range_pct_14']
+
         # === STRATEGY DEFINITIONS ===
         # Strategy 8 & 12 (15m)
         df_15m['s_8'] = (
             (df_15m['time'].dt.time >= time(4, 0)) & 
-            (df_15m['time'].dt.time < time(8, 15)) & 
+            (df_15m['time'].dt.time < time(6, 15)) & 
             (df_15m['cum_sp_bullish'] >= 1) & 
-            (df_15m['sp_bullish_range_pct'] > 0.8) & 
+            (df_15m['sp_bullish_range_pct'] > 0.8) & # 0.8 
             (df_15m['sp_bullish_range_pct'] < 1.3) & 
             (df_15m['zl_macd_signal'] == -1) & 
-            (df_15m['volume_range_pct_10'] > 1) &
+            #(df_15m['volume_range_pct_10'] > 1) &
+            (df_15m['volume_range_pct_10'] > 1.5) &
             (df_15m['atr_10'] / df_15m['close_10'] < 0.04) &
             (df_15m['nifty_trend_15m'] >= 0)
         )
@@ -580,10 +694,11 @@ class BacktestEngine:
             (df_15m['time'].dt.time >= time(4, 0)) & 
             (df_15m['time'].dt.time < time(8, 15)) & 
             (df_15m['cum_sp_bearish'] >= 1) & 
-            (df_15m['sp_bearish_range_pct'] > 1) & 
+            (df_15m['sp_bearish_range_pct'] > 1) & # 1
             (df_15m['zl_macd_signal'] == 1) &
-            (df_15m['volume_range_pct_10'] > 0) &
-            (df_15m['volume_range_pct_10'] < 0.4) &
+            #(df_15m['volume_range_pct_10'] > 0) &
+            #(df_15m['volume_range_pct_10'] < 0.4) &
+            (df_15m['volume_range_pct_10'] < 1.3) &
             (df_15m['atr_10'] / df_15m['close_10'] < 0.04) &
             (df_15m['nifty_trend_15m'] <= 0)
         )
@@ -592,18 +707,41 @@ class BacktestEngine:
         df_15m.loc[first_true_idx_12, 'strategy_12'] = True
         
         
-        # Strategy 10 & 11 (5m)
+        # Strategy 9, 10 & 11 (5m)
+        df_5m['s_9'] = (
+            (df_5m['time'].dt.time >= time(3, 50)) & 
+            (df_5m['time'].dt.time < time(6, 15)) & 
+            (df_5m['cum_sp_bullish'] >= 1) & 
+            (df_5m['sp_bullish_range_pct'] > 0.8) & # 0.8
+            #((df_5m['close'] < df_5m['ema_50']) | (df_5m['close'] < df_5m['ema_100']) | (df_5m['close'] < df_5m['ema_200'])).fillna(False) &
+            ((df_5m['close'] > df_5m['ema_50']) | (df_5m['close'] > df_5m['ema_100']) | (df_5m['close'] > df_5m['ema_200'])).fillna(False) &
+            #(df_5m['close'] > df_5m['ema_50']) & 
+            #(df_5m['close'] > df_5m['ema_100']) & 
+            #(df_5m['close'] > df_5m['ema_200']) & 
+            (df_5m['is_range_bullish']) & 
+            #(df_5m['volume_range_pct_10'] > 0.3) & 
+            #(df_5m['volume_range_pct_10'] < 0.6) &
+            (df_5m['volume_range_pct_10'] < 1.5) &             
+            (df_5m['atr_10'] / df_5m['close_10'] < 0.04) &
+            (df_5m['nifty_trend_15m'] != 1)
+        )
+
+        df_5m['strategy_9'] = False
+        first_true_idx_9 = df_5m[df_5m['s_9']].groupby('date').head(1).index
+        df_5m.loc[first_true_idx_9, 'strategy_9'] = True
+
         df_5m['s_10'] = (
             (df_5m['time'].dt.time >= time(3, 50)) & 
             (df_5m['time'].dt.time < time(8, 15)) & 
             (df_5m['cum_sp_bearish'] >= 1) & 
-            (df_5m['sp_bearish_range_pct'] > 0.6) & 
+            (df_5m['sp_bearish_range_pct'] > 0.8) & 
+            #(df_5m['sp_bearish_range_pct'] < 1.3) & 
             (df_5m['close'] < df_5m['ema_50']) & 
             (df_5m['close'] < df_5m['ema_100']) & 
             (df_5m['close'] < df_5m['ema_200']) & 
             (df_5m['is_range_bearish']) & 
-            (df_5m['volume_range_pct_10'] > 0.3) & 
-            (df_5m['volume_range_pct_10'] < 0.7) & 
+            (df_5m['volume_range_pct_10'] > 2) & 
+            #(df_5m['volume_range_pct_10'] < 0.7) & 
             (df_5m['atr_10'] / df_5m['close_10'] > 0.04) &            
             (df_5m['nifty_trend_15m'] != 1)
         )
@@ -615,13 +753,13 @@ class BacktestEngine:
             (df_5m['time'].dt.time >= time(3, 50)) & 
             (df_5m['time'].dt.time < time(8, 15)) & 
             (df_5m['cum_sp_bullish'] >= 1) & 
-            (df_5m['sp_bullish_range_pct'] > 0.8) & 
+           (df_5m['sp_bullish_range_pct'] < 0.5)& # 0.8 
             (df_5m['close'] > df_5m['ema_50']) & 
             (df_5m['close'] > df_5m['ema_100']) & 
             (df_5m['close'] > df_5m['ema_200']) & 
             (df_5m['is_range_bullish']) & 
-            (df_5m['volume_range_pct_10'] > 0) & 
-            (df_5m['volume_range_pct_10'] < 0.3) &
+            (df_5m['volume_range_pct_10'] > 2) & 
+            #(df_5m['volume_range_pct_10'] < 1.5) &
             (df_5m['atr_10'] / df_5m['close_10'] > 0.04) &
             (df_5m['nifty_trend_15m'] != -1)
         )
@@ -629,23 +767,7 @@ class BacktestEngine:
         first_true_idx_11 = df_5m[df_5m['s_11']].groupby('date').head(1).index
         df_5m.loc[first_true_idx_11, 'strategy_11'] = True
 
-        df_5m['s_9'] = (
-            (df_5m['time'].dt.time >= time(3, 50)) & 
-            (df_5m['time'].dt.time < time(8, 15)) & 
-            (df_5m['cum_sp_bullish'] >= 1) & 
-            (df_5m['sp_bullish_range_pct'] > 0.8) & 
-            (df_5m['close'] > df_5m['ema_50']) & 
-            (df_5m['close'] > df_5m['ema_100']) & 
-            (df_5m['close'] > df_5m['ema_200']) & 
-            (df_5m['is_range_bullish']) & 
-            (df_5m['volume_range_pct_10'] > 0.3) & 
-            (df_5m['volume_range_pct_10'] < 0.6) &
-            (df_5m['atr_10'] / df_5m['close_10'] < 0.04) &
-            (df_5m['nifty_trend_15m'] != 1)
-        )
-        df_5m['strategy_9'] = False
-        first_true_idx_9 = df_5m[df_5m['s_9']].groupby('date').head(1).index
-        df_5m.loc[first_true_idx_9, 'strategy_9'] = True
+        
         
         # Clean up date columns
         df_15m.drop('date', axis=1, inplace=True)
@@ -654,7 +776,7 @@ class BacktestEngine:
         self.logger.info(f"✅ All indicators calculated once for {self.symbol}")
 
         #df_15m.to_csv('15m.csv', index=False)
-        #df_5m.to_csv('5m.csv', index=False)
+        #df_5m.to_csv(f'{self.symbol}_5m_new.csv', index=False)
         
         return {
             '15m': df_15m,

@@ -385,6 +385,7 @@ class MarketDataProcessor:
         # Initialize TimescaleDBManager and connect to the database
         self.db_manager = TimescaleDBManager()
         self.db_conn = self.db_manager.initialize_database('openalgo')
+        self.db_live_conn = self.db_manager.initialize_database('openalgo_live')
         self.logger = logging.getLogger(f"MarketDataProcessor")
         self.interrupt_flag = False  # Add interrupt flag
 
@@ -1034,7 +1035,7 @@ class MarketDataProcessor:
     def shutdown(self):
         """Clean shutdown"""
         logger.info("Shutting down processors")
-        self.trading_engine.stop()
+        #self.trading_engine.stop()
         self.executor.shutdown(wait=True)
         self.consumer.close()
         self.db_conn.close()
@@ -1210,7 +1211,7 @@ if __name__ == "__main__":
                     raise  # Re-raise to exit the program
             
             # Start the Trading Engine        
-            processor.trading_engine.start()
+            #processor.trading_engine.start()
 
             # Process the real-time data
             processor.process_messages()
@@ -1219,7 +1220,7 @@ if __name__ == "__main__":
             logger.info(f"Running in backtest mode from {args.from_date} to {args.to_date}")
 
             end_date = to_date.strftime("%Y-%m-%d")     
-            start_date = (from_date - timedelta(days=1)).strftime("%Y-%m-%d") #20 days
+            start_date = (from_date - timedelta(days=20)).strftime("%Y-%m-%d") #20 days
 
             # Cleaning the backtest results folder
             base_output_dir = args.backtest_folder

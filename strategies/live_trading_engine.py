@@ -162,7 +162,7 @@ class PositionManager:
             # Save state after position opened
             self.save_state()
             
-            logging.info(f"📈 POSITION OPENED: {symbol} {direction} @ {entry_price} | Strategy: {strategy}")
+            logging.info(f"[OPEN] POSITION OPENED: {symbol} {direction} @ {entry_price} | Strategy: {strategy}")
             return position_info 
     
     def close_position(self, symbol, exit_price, exit_reason, exit_order_id, timestamp):
@@ -205,7 +205,7 @@ class PositionManager:
             # Save state after position closed
             self.save_state()
             
-            logging.info(f"📉 POSITION CLOSED: {symbol} {position['direction']} @ {exit_price} | Reason: {exit_reason} | P&L: {pnl:.2f}")
+            logging.info(f"[CLOSE] POSITION CLOSED: {symbol} {position['direction']} @ {exit_price} | Reason: {exit_reason} | P&L: {pnl:.2f}")
             return trade_record
     
     def save_state(self):
@@ -486,16 +486,31 @@ class DatabaseManager:
                 close DECIMAL(18, 2),
                 volume BIGINT,
                 atr_10 DECIMAL(18, 2),
-                volume_10 BIGINT,                
-                nifty_trend_15m INT,
-                curbot DECIMAL(18, 2),
-                curtop DECIMAL(18, 2),
+                volume_10 BIGINT, 
+                close_10 DECIMAL(18, 2),
+                cum_sp_bullish INT,
+                sp_bullish_range_pct DECIMAL(18, 2),
+                cum_sp_bearish INT,
+                sp_bearish_range_pct DECIMAL(18, 2),
+                ema_50 DECIMAL(18, 2),
+                ema_100 DECIMAL(18, 2),
+                ema_200 DECIMAL(18, 2),
+                is_range_bullish BOOLEAN,
+                is_range_bearish BOOLEAN,
+                volume_range_pct_10 DECIMAL(18, 2),
                 cum_intraday_volume BIGINT,
+                today_range_pct_10 DECIMAL(18, 2),
+                nifty_trend_15m INT,                
                 strategy_8 BOOLEAN,
                 strategy_9 BOOLEAN,
                 strategy_10 BOOLEAN,
                 strategy_11 BOOLEAN,
                 strategy_12 BOOLEAN,
+                s_8 BOOLEAN,
+                s_9 BOOLEAN,
+                s_10 BOOLEAN,
+                s_11 BOOLEAN,
+                s_12 BOOLEAN,
                 PRIMARY KEY (time, symbol)
             )
             """,
@@ -513,15 +528,26 @@ class DatabaseManager:
                 volume BIGINT,
                 atr_10 DECIMAL(18, 2),
                 volume_10 BIGINT,
-                nifty_trend_15m INT,
-                curbot DECIMAL(18, 2),
-                curtop DECIMAL(18, 2),
+                close_10 DECIMAL(18, 2),
+                cum_sp_bullish INT,
+                sp_bullish_range_pct DECIMAL(18, 2),
+                cum_sp_bearish INT,
+                sp_bearish_range_pct DECIMAL(18, 2),
+                zl_macd_signal INT,                
+                volume_range_pct_10 DECIMAL(18, 2),
                 cum_intraday_volume BIGINT,
+                today_range_pct_10 DECIMAL(18, 2),
+                nifty_trend_15m INT,
                 strategy_8 BOOLEAN,
                 strategy_9 BOOLEAN,
                 strategy_10 BOOLEAN,
                 strategy_11 BOOLEAN,
                 strategy_12 BOOLEAN,
+                s_8 BOOLEAN,
+                s_9 BOOLEAN,
+                s_10 BOOLEAN,
+                s_11 BOOLEAN,
+                s_12 BOOLEAN,
                 PRIMARY KEY (time, symbol)
             )
             """,
@@ -823,11 +849,11 @@ class HeartbeatMonitor:
                     end_time = end_time.replace(tzinfo=current_time.tzinfo)
                 
                 # Critical fix: Ensure start_time is always before end_time
-                if start_time >= end_time:
-                    colored_log(self.logger, 'warning', 
-                              f"Invalid time range for {timeframe}: start_time ({start_time}) >= end_time ({end_time}). Skipping check.", 
-                              success=False)
-                    continue
+                # if start_time >= end_time:
+                #     colored_log(self.logger, 'warning', 
+                #               f"Invalid time range for {timeframe}: start_time ({start_time}) >= end_time ({end_time}). Skipping check.", 
+                #               success=False)
+                #     continue
                 
                 # Debug: Show the time range being checked
                 colored_log(self.logger, 'debug', 
@@ -1054,7 +1080,7 @@ def colored_log(logger, level, message, success=None):
 
 class LiveDataManager:
     """Manages real-time data and indicator calculations"""
-    def __init__(self, db_config, api_client, api_key, symbols, market_start, market_end, get_active_symbols_callback=None):
+    def __init__(self, db_config, api_client, api_key, symbols, market_start, market_end, get_active_symbols_callback=None, process_entry_callback=None):
         self.db_manager = DatabaseManager(db_config)
         self.db_conn = self.db_manager.initialize_database(db_config['dbname'])        
         self.symbols = symbols
@@ -1065,43 +1091,50 @@ class LiveDataManager:
         self.market_start = market_start
         self.market_end = market_end
         self.get_active_symbols = get_active_symbols_callback  # Callback to get symbols with active positions
+        self.process_entry = process_entry_callback  # Callback to process entry signals
         self.interrupt_flag = False  # Add interrupt flag
         self.lock = threading.RLock()
         self.logger = logging.getLogger("LiveDataManager")
+        
+        # Session-level cache for daily indicators (same throughout the trading session)
+        self.daily_indicators_cache = {}  # Will store {symbol: {atr_10, volume_10, close_10, date}}
+        self.daily_cache_loaded = False
+        
         colored_log(self.logger, 'info', f'Symbols: {self.symbols}', success=True)
         colored_log(self.logger, 'info', f'Instruments list: {self.instruments_list}', success=True)
-
+        
+        
         # Initialize Kafka Consumer
-        self.consumer = KafkaConsumer(
-            'tick_data',
-            bootstrap_servers='localhost:9092',
-            group_id='tick-processor',
-            auto_offset_reset='earliest'
-            #key_deserializer=lambda k: k.decode('utf-8') if k else None,
-            #value_deserializer=lambda v: json.loads(v.decode('utf-8'))
-        )
+        # self.consumer = KafkaConsumer(
+        #     'tick_data',
+        #     bootstrap_servers='localhost:9092',
+        #     group_id='tick-processor',
+        #     auto_offset_reset='earliest'
+        #     #key_deserializer=lambda k: k.decode('utf-8') if k else None,
+        #     #value_deserializer=lambda v: json.loads(v.decode('utf-8'))
+        # )
 
-        colored_log(self.logger, 'info', "Starting consumer with configuration:", success=True)
-        colored_log(self.logger, 'info', f"Group ID: {self.consumer.config['group_id']}", success=True)
-        colored_log(self.logger, 'info', f"Brokers: {self.consumer.config['bootstrap_servers']}", success=True)
+        # colored_log(self.logger, 'info', "Starting consumer with configuration:", success=True)
+        # colored_log(self.logger, 'info', f"Group ID: {self.consumer.config['group_id']}", success=True)
+        # colored_log(self.logger, 'info', f"Brokers: {self.consumer.config['bootstrap_servers']}", success=True)
 
         self.reset_aggregation_buffers()               
         
         #self.db_manager.clean_database(db_config['dbname'])   
 
-        # Check if the database has last 20 days of data for all symbols. If not load the data.
-        symbols_needing_data = self.check_historical_data_loaded(20, self.symbols, ['5m', '15m', 'D'])
+        # Check if the database has last 21 days of data for all symbols. If not load the data.
+        symbols_needing_data = self.check_historical_data_loaded(21, self.symbols, ['5m', '15m', 'D'])
 
         if symbols_needing_data:
             # Initialize with historical data only for symbols that need it
             colored_log(self.logger, 'info', f"Loading historical data for {len(symbols_needing_data)} symbols: {symbols_needing_data}", success=True)
-            self._load_historical_data(20, symbols_needing_data, ['5m', '15m', 'D'])
+            self._load_historical_data(21, symbols_needing_data, ['5m', '15m', 'D'])
         else:
             colored_log(self.logger, 'info', "All symbols have complete historical data - skipping data loading", success=True)   
         
         # Connect and subscribe to real-time data
-        self.api_client.connect()
-        self.api_client.subscribe_quote(self.instruments_list, on_data_received=self.on_data_received)
+        # self.api_client.connect()
+        # self.api_client.subscribe_quote(self.instruments_list, on_data_received=self.on_data_received)
 
         # Initialize heartbeat monitor
         self.heartbeat_monitor = HeartbeatMonitor(
@@ -1112,6 +1145,9 @@ class LiveDataManager:
             market_start=self.market_start,
             get_active_symbols_callback=self.get_active_symbols
         )
+        
+        # Load daily indicators cache for all symbols (once per session)
+        self._load_daily_indicators_cache()
 
         self.is_running = False
         self.data_thread = None  
@@ -1163,7 +1199,7 @@ class LiveDataManager:
                             needs_data = True
                         
                         # Check if we have recent data (at least within last 2 days)
-                        elif latest_date is None or (current_date - latest_date).days > 2:
+                        elif latest_date is None or (current_date - latest_date).days > 1:
                             colored_log(self.logger, 'warning', f"Latest data for {symbol} in {table_name} is from {latest_date}, which is too old", success=False)
                             needs_data = True
 
@@ -1274,7 +1310,7 @@ class LiveDataManager:
             if (timeframe == '5m' and symbol != 'NIFTY') or timeframe == '15m':
                 # Only recalculate indicators for completed candles
                 current_time = datetime.now()
-                start_date = current_time.date() - timedelta(days=20)  # Last 20 days for indicators
+                start_date = current_time.date() - timedelta(days=21)  # Last 21 days for indicators
                 end_date = current_time.date()
                 
                 # Calculate indicators for the symbol
@@ -1295,11 +1331,13 @@ class LiveDataManager:
         return dt - discard
         
     def _load_historical_data(self, days, symbols, intervals, purpose='general'):
-        """Load last 20 days data and clear existing intraday data"""
+        """Load last 21 days data and clear existing intraday data"""
         try:                   
             
-            # Calculate date range (last 20 days)
-            end_date = datetime.now().date()
+            # Calculate date range (last 21 days)
+            # End date is yesterday if the weekday is other than Monday
+            # If its monday, then end date should be last friday
+            end_date = datetime.now().date() - timedelta(days=1) if datetime.now().weekday() != 0 else datetime.now().date() - timedelta(days=3)
             start_date = end_date - timedelta(days=days)
             
             if purpose == 'general':
@@ -1399,7 +1437,7 @@ class LiveDataManager:
         try:
             # Get minimal historical data needed for indicator calculations
             if timeframe == '15m':
-                lookback_days = 20
+                lookback_days = 21
             elif timeframe == '5m':
                 lookback_days = 10
             else:
@@ -1410,15 +1448,14 @@ class LiveDataManager:
             
             # Fetch only necessary data
             df_current = self.fetch_lookback_data(start_date, end_date, timeframe, symbol)
-            df_daily = self.fetch_lookback_data(end_date - timedelta(days=20), end_date, 'd', symbol)
             df_nifty_15m = self.fetch_lookback_data(end_date - timedelta(days=20), end_date, 'nifty_15m', 'NIFTY')
             
-            if df_current.empty or df_daily.empty or df_nifty_15m.empty:
+            if df_current.empty or df_nifty_15m.empty:
                 colored_log(self.logger, 'warning', f"Missing data for incremental indicator calculation: {symbol} {timeframe}", success=False)
                 return
             
             # Calculate indicators for the full dataset (needed for rolling/ewm calculations)
-            df_with_indicators = self._calculate_indicators_for_timeframe(df_current, df_daily, df_nifty_15m, symbol, timeframe)
+            df_with_indicators = self._calculate_indicators_for_timeframe(df_current, df_nifty_15m, symbol, timeframe)
             
             if not df_with_indicators.empty:
                 # Only update the database with the LATEST record (most recent candle)
@@ -1433,7 +1470,7 @@ class LiveDataManager:
         """Full indicator calculation for initial loads - ORIGINAL APPROACH"""
         try:                       
             df_all_dict  = {
-            '15m': self.fetch_lookback_data(end_date- timedelta(days=20), end_date, '15m', symbol),
+            '15m': self.fetch_lookback_data(end_date- timedelta(days=21), end_date, '15m', symbol),
             '5m': self.fetch_lookback_data(end_date- timedelta(days=10), end_date, '5m', symbol),
             '1m': self.fetch_lookback_data(end_date- timedelta(days=1) , end_date, '1m', symbol),
             'd': self.fetch_lookback_data(start_date - timedelta(days=20), end_date, 'd', symbol),
@@ -1459,26 +1496,67 @@ class LiveDataManager:
         except Exception as e:
             colored_log(self.logger, 'error', f"Error calculating indicators for {symbol}: {e}", success=False)
 
-    def _calculate_indicators_for_timeframe(self, df_current, df_daily, df_nifty_15m, symbol, timeframe):
+    def _load_daily_indicators_cache(self):
+        """Load daily indicators for all symbols once per session (optimization)"""
+        try:
+            colored_log(self.logger, 'info', "Loading daily indicators cache for all symbols...", success=True)
+            
+            current_time = datetime.now()
+            end_date = current_time.date() - timedelta(days=1)
+            
+            for symbol in self.symbols:
+                try:
+                    # Get daily data for this symbol
+                    df_daily = self.fetch_lookback_data(end_date - timedelta(days=30), end_date, 'd', symbol)
+                    
+                    if not df_daily.empty:
+                        # Calculate daily indicators
+                        df_daily['prev_close'] = df_daily['close'].shift(1)
+                        df_daily['tr1'] = df_daily['high'] - df_daily['low']
+                        df_daily['tr2'] = abs(df_daily['high'] - df_daily['prev_close'])
+                        df_daily['tr3'] = abs(df_daily['low'] - df_daily['prev_close'])
+                        df_daily['tr'] = df_daily[['tr1', 'tr2', 'tr3']].max(axis=1)
+                        df_daily['atr_10'] = df_daily['tr'].ewm(span=10, adjust=False).mean()
+                        df_daily['volume_10'] = df_daily['volume'].rolling(window=10).mean()
+                        df_daily['close_10'] = df_daily['close'].rolling(window=10).mean()
+                        df_daily['date'] = df_daily['time'].dt.date
+                        
+                        # Use the latest available daily data (yesterday during trading hours)
+                        latest_daily = df_daily.iloc[-1]
+
+                        df_daily.to_csv('daily.csv', index=False)
+                        
+                        # Cache the indicators for this symbol
+                        self.daily_indicators_cache[symbol] = {
+                            'atr_10': latest_daily['atr_10'],
+                            'volume_10': latest_daily['volume_10'],
+                            'close_10': latest_daily['close_10'],
+                            'date': latest_daily['date']
+                        }
+                        
+                    else:
+                        colored_log(self.logger, 'warning', f"No daily data found for {symbol}", success=False)
+                        
+                except Exception as e:
+                    colored_log(self.logger, 'error', f"Error loading daily indicators for {symbol}: {e}", success=False)
+            
+            self.daily_cache_loaded = True
+            cache_date = list(self.daily_indicators_cache.values())[0]['date'] if self.daily_indicators_cache else "N/A"
+            colored_log(self.logger, 'info', f"Daily indicators cache loaded for {len(self.daily_indicators_cache)} symbols using data from {cache_date}", success=True)
+            
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error loading daily indicators cache: {e}", success=False)
+
+    def _calculate_indicators_for_timeframe(self, df_current, df_nifty_15m, symbol, timeframe):
         """Calculate indicators for a specific timeframe - optimized for latest candle updates"""
         try:
             # Ensure time columns are datetime
-            for df in [df_current, df_daily, df_nifty_15m]:
+            for df in [df_current, df_nifty_15m]:
                 if not df.empty:
                     df['time'] = pd.to_datetime(df['time'])
             
-            # Calculate daily indicators (needed for merging)
-            if not df_daily.empty:
-                df_daily['prev_close'] = df_daily['close'].shift(1)
-                df_daily['tr1'] = df_daily['high'] - df_daily['low']
-                df_daily['tr2'] = abs(df_daily['high'] - df_daily['prev_close'])
-                df_daily['tr3'] = abs(df_daily['low'] - df_daily['prev_close'])
-                df_daily['tr'] = df_daily[['tr1', 'tr2', 'tr3']].max(axis=1)
-                df_daily['atr_10'] = df_daily['tr'].ewm(span=10, adjust=False).mean()
-                df_daily['volume_10'] = df_daily['volume'].rolling(window=10).mean()
-                df_daily['close_10'] = df_daily['close'].rolling(window=10).mean()
-                df_daily['date'] = df_daily['time'].dt.date
-
+            # Daily indicators are now cached - no need to recalculate
+            
             # Calculate nifty 15m indicators (needed for merging)
             if not df_nifty_15m.empty:
                 df_nifty_15m['date'] = df_nifty_15m['time'].dt.date
@@ -1490,15 +1568,17 @@ class LiveDataManager:
                 df_nifty_15m['nifty_15m_MACD'], df_nifty_15m['nifty_15m_MACD_Signal'], _ = talib.MACD(df_nifty_15m['close'], fastperiod=20, slowperiod=50, signalperiod=10)
                 df_nifty_15m['nifty_trend_15m'] = df_nifty_15m.apply(self.classify_trend, args=('15m',), axis=1)
                 df_nifty_15m = df_nifty_15m.groupby('date').last().reset_index()
-                df_nifty_15m['nifty_trend_15m'] = df_nifty_15m['nifty_trend_15m'].shift(1)
+                #df_nifty_15m['nifty_trend_15m'] = df_nifty_15m['nifty_trend_15m'].shift(1)
             
             # Calculate current timeframe indicators
             if not df_current.empty:
+                df_current = df_current.copy()  # Ensure we work with a copy
                 df_current['date'] = df_current['time'].dt.date
+                df_current = df_current[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].copy()
                 
                 if timeframe == '5m':
                     for period in [50, 100, 200]:
-                        df_current[f'ema_{period}'] = df_current['close'].ewm(span=period, adjust=False).mean()
+                        df_current.loc[:, f'ema_{period}'] = df_current['close'].ewm(span=period, adjust=False).mean()
                     # Only keep today's date before calculating single prints
                     df_current = df_current[df_current['date'] == datetime.now(IST).date()].reset_index(drop=True)
                     # Calculate range
@@ -1513,17 +1593,28 @@ class LiveDataManager:
                     except Exception as e:
                         self.logger.warning(f"Error calculating avg_range_ex_first_30min for 5m: {e}, using avg_range_all instead")
                         df_current['avg_range_ex_first_30min'] = df_current['avg_range_all']
+                    # Create a mask for first 30 minutes (3:45 to 4:15 UTC)
+                    first_30min_mask = (
+                        (df_current['time'].dt.time >= time(3, 45)) & 
+                        (df_current['time'].dt.time < time(4, 15))
+                    )
+                    
+                    # For first 30 minutes, use rolling average of today's ranges
+                    # For after 30 minutes, use avg_range_ex_first_30min
+                    avg_range_for_comparison = df_current['avg_range_ex_first_30min'].copy()
+                    avg_range_for_comparison.loc[first_30min_mask] = df_current.loc[first_30min_mask, 'avg_range_all']
+                    
                     df_current['is_range_bullish'] = (
-                        (df_current['range'] > 0.7 * df_current['avg_range_ex_first_30min']) & 
+                        (df_current['range'] > 0.7 * avg_range_for_comparison) & 
                         (df_current['close'] > df_current['open']) & 
                         (df_current['close'] > (((df_current['high'] - df_current['open']) * 0.5) + df_current['open']))
                     )
                     df_current['is_range_bearish'] = (
-                        (df_current['range'] > 0.7 * df_current['avg_range_ex_first_30min']) & 
+                        (df_current['range'] > 0.7 * avg_range_for_comparison) & 
                         (df_current['close'] < df_current['open']) & 
                         (df_current['close'] < (((df_current['open'] - df_current['low']) * 0.5) + df_current['low']))
                     )                   
-            
+                            
                 if timeframe == '15m':
                     df_current = self._calculate_zlema_macd(df_current)
                     # Only keep today's date before calculating single prints
@@ -1586,6 +1677,26 @@ class LiveDataManager:
                 df_current['cum_sp_bullish'] = df_current.groupby('date')['sp_confirmed_bullish'].cumsum()
                 df_current['cum_sp_bearish'] = df_current.groupby('date')['sp_confirmed_bearish'].cumsum()
 
+                # Merge with daily data
+                # Use cached daily indicators (optimized - same values throughout session)
+                if symbol in self.daily_indicators_cache:
+                    cached_daily = self.daily_indicators_cache[symbol]
+                    df_current['atr_10'] = cached_daily['atr_10']
+                    df_current['volume_10'] = cached_daily['volume_10'] 
+                    df_current['close_10'] = cached_daily['close_10']
+                else:
+                    colored_log(self.logger, 'warning', f"No cached daily indicators for {symbol}, using default values", success=False)
+                    # Fallback to safe default values to prevent crashes
+                    df_current['atr_10'] = 1.0  # Minimum ATR to prevent division by zero
+                    df_current['volume_10'] = df_current['volume'].mean() if not df_current.empty else 1000
+                    df_current['close_10'] = df_current['close'].mean() if not df_current.empty else 100                
+                
+                # Merge with nifty 15m data
+                # Use the latest available nifty 15m
+                if not df_nifty_15m.empty:
+                    latest_nifty = df_nifty_15m.iloc[-1]
+                    df_current['nifty_trend_15m'] = latest_nifty['nifty_trend_15m']
+                
                 # VOLUME AND RANGE CALCULATIONS
                 df_current['cum_intraday_volume'] = df_current.groupby('date')['volume'].cumsum()
                 df_current['curtop'] = df_current.groupby('date')['high'].cummax()
@@ -1594,103 +1705,98 @@ class LiveDataManager:
                 df_current['today_range_pct_10'] = df_current['today_range'] / df_current['atr_10']
                 df_current['volume_range_pct_10'] = (df_current['cum_intraday_volume'] / df_current['volume_10']) / df_current['today_range_pct_10']
                 
-                # Merge with daily data
-                if not df_daily.empty:
-                    daily_cols = ['date', 'atr_10', 'volume_10', 'close_10']
-                    df_current = df_current.merge(df_daily[daily_cols], on='date', how='left')
-
-                # Merge with nifty 15m data
-                if not df_nifty_15m.empty:
-                    df_current = df_current.merge(df_nifty_15m[['date', 'nifty_trend_15m']], on='date', how='left')
-                
                 # STRATEGY DEFINITIONS
-                df_current['s_8'] = (
-                    (df_current['time'].dt.time >= time(4, 0)) & 
-                    (df_current['time'].dt.time < time(8, 15)) & 
-                    (df_current['cum_sp_bullish'] >= 1) & 
-                    (df_current['sp_bullish_range_pct'] > 0.8) & 
-                    (df_current['sp_bullish_range_pct'] < 1.3) & 
-                    (df_current['zl_macd_signal'] == -1) & 
-                    (df_current['volume_range_pct_10'] > 1) &
-                    (df_current['atr_10'] / df_current['close_10'] < 0.04) &
-                    (df_current['nifty_trend_15m'] >= 0)
-                )
-                df_current['strategy_8'] = False
-                first_true_idx_8 = df_current[df_current['s_8']].groupby('date').head(1).index
-                df_current.loc[first_true_idx_8, 'strategy_8'] = True
+                # Initialize all strategy columns with False
+                for strategy_num in [8, 9, 10, 11, 12]:
+                    df_current[f'strategy_{strategy_num}'] = False
                 
-                df_current['s_12'] = (
-                    (df_current['time'].dt.time >= time(4, 0)) & 
-                    (df_current['time'].dt.time < time(8, 15)) & 
-                    (df_current['cum_sp_bearish'] >= 1) & 
-                    (df_current['sp_bearish_range_pct'] > 1) & 
-                    (df_current['zl_macd_signal'] == 1) &
-                    (df_current['volume_range_pct_10'] > 0) &
-                    (df_current['volume_range_pct_10'] < 0.4) &
-                    (df_current['atr_10'] / df_current['close_10'] < 0.04) &
-                    (df_current['nifty_trend_15m'] <= 0)
-                )
-                df_current['strategy_12'] = False
-                first_true_idx_12 = df_current[df_current['s_12']].groupby('date').head(1).index
-                df_current.loc[first_true_idx_12, 'strategy_12'] = True                
+                # Strategies 8 and 12 - only for 15m timeframe
+                if timeframe == '15m':
+                    df_current['s_8'] = (
+                        (df_current['time'].dt.time >= time(4, 0)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bullish'] >= 1) & 
+                        (df_current['sp_bullish_range_pct'] > 0.8) & 
+                        (df_current['sp_bullish_range_pct'] < 1.3) & 
+                        (df_current['zl_macd_signal'] == -1) & 
+                        (df_current['volume_range_pct_10'] > 1) &
+                        (df_current['atr_10'] / df_current['close_10'] < 0.04) &
+                        (df_current['nifty_trend_15m'] >= 0)
+                    )
+                    first_true_idx_8 = df_current[df_current['s_8']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_8, 'strategy_8'] = True
+                    
+                    df_current['s_12'] = (
+                        (df_current['time'].dt.time >= time(4, 0)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bearish'] >= 1) & 
+                        (df_current['sp_bearish_range_pct'] > 1) & 
+                        (df_current['zl_macd_signal'] == 1) &
+                        (df_current['volume_range_pct_10'] > 0) &
+                        (df_current['volume_range_pct_10'] < 0.4) &
+                        (df_current['atr_10'] / df_current['close_10'] < 0.04) &
+                        (df_current['nifty_trend_15m'] <= 0)
+                    )
+                    first_true_idx_12 = df_current[df_current['s_12']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_12, 'strategy_12'] = True
                 
-                # Strategy 10 & 11 (5m)
-                df_current['s_10'] = (
-                    (df_current['time'].dt.time >= time(3, 50)) & 
-                    (df_current['time'].dt.time < time(8, 15)) & 
-                    (df_current['cum_sp_bearish'] >= 1) & 
-                    (df_current['sp_bearish_range_pct'] > 0.6) & 
-                    (df_current['close'] < df_current['ema_50']) & 
-                    (df_current['close'] < df_current['ema_100']) & 
-                    (df_current['close'] < df_current['ema_200']) & 
-                    (df_current['is_range_bearish']) & 
-                    (df_current['volume_range_pct_10'] > 0.3) & 
-                    (df_current['volume_range_pct_10'] < 0.7) & 
-                    (df_current['atr_10'] / df_current['close_10'] > 0.04) &            
-                    (df_current['nifty_trend_15m'] != 1)
-                )
-                df_current['strategy_10'] = False
-                first_true_idx_10 = df_current[df_current['s_10']].groupby('date').head(1).index
-                df_current.loc[first_true_idx_10, 'strategy_10'] = True
-                
-                df_current['s_11'] = (
-                    (df_current['time'].dt.time >= time(3, 50)) & 
-                    (df_current['time'].dt.time < time(8, 15)) & 
-                    (df_current['cum_sp_bullish'] >= 1) & 
-                    (df_current['sp_bullish_range_pct'] > 0.8) & 
-                    (df_current['close'] > df_current['ema_50']) & 
-                    (df_current['close'] > df_current['ema_100']) & 
-                    (df_current['close'] > df_current['ema_200']) & 
-                    (df_current['is_range_bullish']) & 
-                    (df_current['volume_range_pct_10'] > 0) & 
-                    (df_current['volume_range_pct_10'] < 0.3) &
-                    (df_current['atr_10'] / df_current['close_10'] > 0.04) &
-                    (df_current['nifty_trend_15m'] != -1)
-                )
-                df_current['strategy_11'] = False
-                first_true_idx_11 = df_current[df_current['s_11']].groupby('date').head(1).index
-                df_current.loc[first_true_idx_11, 'strategy_11'] = True
+                # Strategies 9, 10, and 11 - only for 5m timeframe
+                if timeframe == '5m':
+                    df_current['s_10'] = (
+                        (df_current['time'].dt.time >= time(3, 50)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bearish'] >= 1) & 
+                        (df_current['sp_bearish_range_pct'] > 0.6) & 
+                        (df_current['close'] < df_current['ema_50']) & 
+                        (df_current['close'] < df_current['ema_100']) & 
+                        (df_current['close'] < df_current['ema_200']) & 
+                        (df_current['is_range_bearish']) & 
+                        (df_current['volume_range_pct_10'] > 0.3) & 
+                        (df_current['volume_range_pct_10'] < 0.7) & 
+                        (df_current['atr_10'] / df_current['close_10'] > 0.04) &            
+                        (df_current['nifty_trend_15m'] != 1)
+                    )
+                    first_true_idx_10 = df_current[df_current['s_10']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_10, 'strategy_10'] = True
+                    
+                    df_current['s_11'] = (
+                        (df_current['time'].dt.time >= time(3, 50)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bullish'] >= 1) & 
+                        (df_current['sp_bullish_range_pct'] > 0.8) & 
+                        (df_current['close'] > df_current['ema_50']) & 
+                        (df_current['close'] > df_current['ema_100']) & 
+                        (df_current['close'] > df_current['ema_200']) & 
+                        (df_current['is_range_bullish']) & 
+                        (df_current['volume_range_pct_10'] > 0) & 
+                        (df_current['volume_range_pct_10'] < 0.3) &
+                        (df_current['atr_10'] / df_current['close_10'] > 0.04) &
+                        (df_current['nifty_trend_15m'] != -1)
+                    )
+                    first_true_idx_11 = df_current[df_current['s_11']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_11, 'strategy_11'] = True
 
-                df_current['s_9'] = (
-                    (df_current['time'].dt.time >= time(3, 50)) & 
-                    (df_current['time'].dt.time < time(8, 15)) & 
-                    (df_current['cum_sp_bullish'] >= 1) & 
-                    (df_current['sp_bullish_range_pct'] > 0.8) & 
-                    (df_current['close'] > df_current['ema_50']) & 
-                    (df_current['close'] > df_current['ema_100']) & 
-                    (df_current['close'] > df_current['ema_200']) & 
-                    (df_current['is_range_bullish']) & 
-                    (df_current['volume_range_pct_10'] > 0.3) & 
-                    (df_current['volume_range_pct_10'] < 0.6) &
-                    (df_current['atr_10'] / df_current['close_10'] < 0.04) &
-                    (df_current['nifty_trend_15m'] != 1)
-                )
-                df_current['strategy_9'] = False
-                first_true_idx_9 = df_current[df_current['s_9']].groupby('date').head(1).index
-                df_current.loc[first_true_idx_9, 'strategy_9'] = True
+                    df_current['s_9'] = (
+                        (df_current['time'].dt.time >= time(3, 50)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bullish'] >= 1) & 
+                        (df_current['sp_bullish_range_pct'] > 0.8) & 
+                        (df_current['close'] > df_current['ema_50']) & 
+                        (df_current['close'] > df_current['ema_100']) & 
+                        (df_current['close'] > df_current['ema_200']) & 
+                        (df_current['is_range_bullish']) & 
+                        (df_current['volume_range_pct_10'] > 0.3) & 
+                        (df_current['volume_range_pct_10'] < 0.6) &
+                        (df_current['atr_10'] / df_current['close_10'] < 0.04) &
+                        (df_current['nifty_trend_15m'] != 1)
+                    )
+                    first_true_idx_9 = df_current[df_current['s_9']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_9, 'strategy_9'] = True
 
                 # Clean up temporary columns
-                df_current.drop(['date'], axis=1, inplace=True, errors='ignore')
+                #temp_cols_to_drop = ['date', 's_8', 's_9', 's_10', 's_11', 's_12']
+                temp_cols_to_drop = ['date']
+                df_current.drop(temp_cols_to_drop, axis=1, inplace=True, errors='ignore')
             
             return df_current
             
@@ -1704,15 +1810,18 @@ class LiveDataManager:
             if len(df) < 50:  # Need minimum data for MACD
                 return df           
             
+            # Ensure we work with a copy to avoid SettingWithCopyWarning
+            df = df.copy()
+            
             # Calculate ZLEMA MACD
-            df['fast_zlema'] = self.zero_lag_ema(df['close'], 12)
-            df['slow_zlema'] = self.zero_lag_ema(df['close'], 26)
-            df['zl_macd'] = df['fast_zlema'] - df['slow_zlema']
-            df['zl_signal'] = df['zl_macd'].ewm(span=9, adjust=False).mean()
-            df['zl_hist'] = df['zl_macd'] - df['zl_signal']
+            df.loc[:, 'fast_zlema'] = self.zero_lag_ema(df['close'], 12)
+            df.loc[:, 'slow_zlema'] = self.zero_lag_ema(df['close'], 26)
+            df.loc[:, 'zl_macd'] = df['fast_zlema'] - df['slow_zlema']
+            df.loc[:, 'zl_signal'] = df['zl_macd'].ewm(span=9, adjust=False).mean()
+            df.loc[:, 'zl_hist'] = df['zl_macd'] - df['zl_signal']
             
             # Generate MACD Signals
-            df['zl_macd_signal'] = 0
+            df.loc[:, 'zl_macd_signal'] = 0
             df.loc[(df['zl_macd'] > df['zl_signal']) & 
                     (df['zl_macd'].shift(1) <= df['zl_signal'].shift(1)), 'zl_macd_signal'] = 1
             df.loc[(df['zl_macd'] < df['zl_signal']) & 
@@ -1815,7 +1924,7 @@ class LiveDataManager:
         ema_bearish = row['close'] < row[f'nifty_{interval}_ema_50'] < row[f'nifty_{interval}_ema_200']
         #hma_bullish = row['close'] > row[f'nifty_{interval}_hma_50'] > row[f'nifty_{interval}_hma_200']
         #hma_bearish = row['close'] < row[f'nifty_{interval}_hma_50'] < row[f'nifty_{interval}_hma_200']
-        rmi_strong = row[f'nifty_{interval}_RMI'] > 60  # RMI > 60 = strong trend
+        #rmi_strong = row[f'nifty_{interval}_RMI'] > 60  # RMI > 60 = strong trend
         adx_strong = row[f'nifty_{interval}_adx'] > 20
         di_bullish = row[f'nifty_{interval}_+DI'] > row[f'nifty_{interval}_-DI']
         di_bearish = row[f'nifty_{interval}_-DI'] > row[f'nifty_{interval}_+DI']
@@ -1872,8 +1981,6 @@ class LiveDataManager:
         df_daily['tr'] = df_daily[['tr1', 'tr2', 'tr3']].max(axis=1)
         df_daily['atr_10'] = df_daily['tr'].ewm(span=10, adjust=False).mean()
         df_daily['volume_10'] = df_daily['volume'].rolling(window=10).mean()
-        df_daily['atr_14'] = df_daily['tr'].ewm(span=14, adjust=False).mean()
-        df_daily['volume_14'] = df_daily['volume'].rolling(window=14).mean()
         df_daily['close_10'] = df_daily['close'].rolling(window=10).mean()
         df_daily['close_14'] = df_daily['close'].rolling(window=14).mean()
         df_daily['rsi_14'] = talib.RSI(df_daily['close'], timeperiod=14)
@@ -1888,13 +1995,12 @@ class LiveDataManager:
         
         
         # Merge ATR from daily data
-        df_15m = df_15m[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'atr_14', 'volume_14', 'close_14']], on='date', how='left')
-        df_5m = df_5m[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'atr_14', 'volume_14', 'close_14']], on='date', how='left')
+        df_15m = df_15m[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'close_14']], on='date', how='left')
+        df_5m = df_5m[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'close_14']], on='date', how='left')
         
         # === NIFTY 15m INDICATORS (Nifty 50EMA) ===
-        df_nifty_15m = df_nifty_15m.merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'atr_14', 'volume_14', 'close_14', 'rsi_14', 'adx_14']], on='date', how='left')    
+        df_nifty_15m = df_nifty_15m.merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'close_14', 'rsi_14', 'adx_14']], on='date', how='left')    
 
-        
         df_nifty_15m['nifty_15m_ema_50'] = df_nifty_15m['close'].ewm(span=50, adjust=False).mean()
         df_nifty_15m['nifty_15m_ema_200'] = df_nifty_15m['close'].ewm(span=200, adjust=False).mean()
         df_nifty_15m['nifty_15m_adx'] = talib.ADX(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
@@ -1939,13 +2045,24 @@ class LiveDataManager:
         except Exception as e:
             colored_log(self.logger, 'warning', f"Error calculating avg_range_ex_first_30min for 15m: {e}, using avg_range_all instead", success=False)
             df_15m['avg_range_ex_first_30min'] = df_15m['avg_range_all']
+        # Create a mask for first 30 minutes (3:45 to 4:15 UTC)
+        first_30min_mask_15m = (
+            (df_15m['time'].dt.time >= time(3, 45)) & 
+            (df_15m['time'].dt.time < time(4, 15))
+        )
+        
+        # For first 30 minutes, use rolling average of today's ranges
+        # For after 30 minutes, use avg_range_ex_first_30min
+        avg_range_for_comparison_15m = df_15m['avg_range_ex_first_30min'].copy()
+        avg_range_for_comparison_15m.loc[first_30min_mask_15m] = df_15m.loc[first_30min_mask_15m, 'avg_range_all']
+        
         df_15m['is_range_bullish'] = (
-            (df_15m['range'] > 0.7 * df_15m['avg_range_ex_first_30min']) & 
+            (df_15m['range'] > 0.7 * avg_range_for_comparison_15m) & 
             (df_15m['close'] > df_15m['open']) & 
             (df_15m['close'] > (((df_15m['high'] - df_15m['open']) * 0.5) + df_15m['open']))
         )
         df_15m['is_range_bearish'] = (
-            (df_15m['range'] > 0.7 * df_15m['avg_range_ex_first_30min']) & 
+            (df_15m['range'] > 0.7 * avg_range_for_comparison_15m) & 
             (df_15m['close'] < df_15m['open']) & 
             (df_15m['close'] < (((df_15m['open'] - df_15m['low']) * 0.5) + df_15m['low']))
         )
@@ -1967,13 +2084,24 @@ class LiveDataManager:
         except Exception as e:
             colored_log(self.logger, 'warning', f"Error calculating avg_range_ex_first_30min for 5m: {e}, using avg_range_all instead", success=False)
             df_5m['avg_range_ex_first_30min'] = df_5m['avg_range_all']
+        # Create a mask for first 30 minutes (3:45 to 4:15 UTC)
+        first_30min_mask_5m = (
+            (df_5m['time'].dt.time >= time(3, 45)) & 
+            (df_5m['time'].dt.time < time(4, 15))
+        )
+        
+        # For first 30 minutes, use rolling average of today's ranges
+        # For after 30 minutes, use avg_range_ex_first_30min
+        avg_range_for_comparison_5m = df_5m['avg_range_ex_first_30min'].copy()
+        avg_range_for_comparison_5m.loc[first_30min_mask_5m] = df_5m.loc[first_30min_mask_5m, 'avg_range_all']
+        
         df_5m['is_range_bullish'] = (
-            (df_5m['range'] > 0.7 * df_5m['avg_range_ex_first_30min']) & 
+            (df_5m['range'] > 0.7 * avg_range_for_comparison_5m) & 
             (df_5m['close'] > df_5m['open']) & 
             (df_5m['close'] > (((df_5m['high'] - df_5m['open']) * 0.5) + df_5m['open']))
         )
         df_5m['is_range_bearish'] = (
-            (df_5m['range'] > 0.7 * df_5m['avg_range_ex_first_30min']) & 
+            (df_5m['range'] > 0.7 * avg_range_for_comparison_5m) & 
             (df_5m['close'] < df_5m['open']) & 
             (df_5m['close'] < (((df_5m['open'] - df_5m['low']) * 0.5) + df_5m['low']))
         )
@@ -2116,10 +2244,8 @@ class LiveDataManager:
         df_15m['predicted_today_high'] = df_15m['curbot'] + df_15m['atr_10']
         df_15m['predicted_today_low'] = df_15m['curtop'] - df_15m['atr_10']
         df_15m['today_range'] = df_15m['curtop'] - df_15m['curbot']
-        df_15m['today_range_pct_10'] = df_15m['today_range'] / df_15m['atr_10']
-        df_15m['today_range_pct_14'] = df_15m['today_range'] / df_15m['atr_14']
+        df_15m['today_range_pct_10'] = df_15m['today_range'] / df_15m['atr_10']        
         df_15m['volume_range_pct_10'] = (df_15m['cum_intraday_volume'] / df_15m['volume_10']) / df_15m['today_range_pct_10']
-        df_15m['volume_range_pct_14'] = (df_15m['cum_intraday_volume'] / df_15m['volume_14']) / df_15m['today_range_pct_14']
         
         # === VOLUME & RANGE CALCULATIONS - 5m ===
         df_5m['cum_intraday_volume'] = df_5m.groupby('date')['volume'].cumsum()
@@ -2129,9 +2255,7 @@ class LiveDataManager:
         df_5m['predicted_today_low'] = df_5m['curtop'] - df_5m['atr_10']
         df_5m['today_range'] = df_5m['curtop'] - df_5m['curbot']
         df_5m['today_range_pct_10'] = df_5m['today_range'] / df_5m['atr_10']
-        df_5m['today_range_pct_14'] = df_5m['today_range'] / df_5m['atr_14']
         df_5m['volume_range_pct_10'] = (df_5m['cum_intraday_volume'] / df_5m['volume_10']) / df_5m['today_range_pct_10']
-        df_5m['volume_range_pct_14'] = (df_5m['cum_intraday_volume'] / df_5m['volume_14']) / df_5m['today_range_pct_14']
         
         # === STRATEGY DEFINITIONS ===
         # Strategy 8 & 12 (15m)
@@ -2250,7 +2374,10 @@ class LiveDataManager:
             
             cursor = self.db_conn.cursor()            
             
-            indicator_columns = ['atr_10', 'volume_10', 'nifty_trend_15m', 'curbot', 'curtop', 'cum_intraday_volume', 'strategy_8', 'strategy_9', 'strategy_10', 'strategy_11', 'strategy_12']
+            if timeframe == '15m':
+                indicator_columns = ['atr_10', 'volume_10', 'close_10', 'cum_sp_bullish', 'sp_bullish_range_pct', 'cum_sp_bearish', 'sp_bearish_range_pct', 'zl_macd_signal', 'volume_range_pct_10', 'cum_intraday_volume', 'today_range_pct_10', 'nifty_trend_15m', 'strategy_8', 'strategy_9', 'strategy_10', 'strategy_11', 'strategy_12', 's_8', 's_9', 's_10', 's_11', 's_12']
+            else:
+                indicator_columns = ['atr_10', 'volume_10', 'close_10', 'cum_sp_bullish', 'sp_bullish_range_pct', 'cum_sp_bearish', 'sp_bearish_range_pct', 'ema_50', 'ema_100', 'ema_200', 'is_range_bullish', 'is_range_bearish', 'volume_range_pct_10', 'cum_intraday_volume', 'today_range_pct_10', 'nifty_trend_15m', 'strategy_8', 'strategy_9', 'strategy_10', 'strategy_11', 'strategy_12', 's_8', 's_9', 's_10', 's_11', 's_12']
             
             for _, row in df.iterrows():
                 # Build update query for available indicators
@@ -2261,11 +2388,11 @@ class LiveDataManager:
                     if col in row and pd.notna(row[col]):
                         update_parts.append(f"{col} = %s")
                         # Convert boolean strategy values to integers
-                        if col.startswith('nifty_trend_15m') or col.startswith('volume_') or col.startswith('cum_intraday_volume'):
+                        if col.startswith('nifty_trend_15m') or col.startswith('volume_10') or col.startswith('cum_sp_bullish') or col.startswith('cum_sp_bearish') or col.startswith('cum_intraday_volume') or col.startswith('zl_macd_signal') or col.startswith('nifty_trend_15m'):
                             values.append(int(row[col]))
-                        elif col.startswith('atr_') or col.startswith('curbot') or col.startswith('curtop'):
+                        elif col.startswith('atr_') or col.startswith('close_') or col.startswith('volume_range_pct_10') or col.startswith('curtop') or col.startswith('ema_') or col.startswith('sp_bullish_range_pct') or col.startswith('sp_bearish_range_pct') or col.startswith('volume_range_pct_10') or col.startswith('today_range_pct_10'):
                             values.append(float(row[col]))
-                        elif col.startswith('strategy_'):
+                        elif col.startswith('strategy_') or col.startswith('s_') or col.startswith('is_range_bullish') or col.startswith('is_range_bearish'):
                             values.append(bool(row[col]))
                         else:
                             values.append(row[col])
@@ -2409,7 +2536,7 @@ class LiveDataManager:
                         if 'timeout' in str(df.get('message', '')).lower():
                             if attempt < max_retries - 1:
                                 wait_time = (2 ** attempt) + random.uniform(0, 1)  # Exponential backoff
-                                colored_log(self.logger, 'warning', f"[{symbol}] ⏳ Timeout on attempt {attempt + 1}, retrying in {wait_time:.1f}s...", success=False)
+                                colored_log(self.logger, 'warning', f"[{symbol}] [RETRY] Timeout on attempt {attempt + 1}, retrying in {wait_time:.1f}s...", success=False)
                                 time_module.sleep(wait_time)
                                 continue
                         colored_log(self.logger, 'warning', f"[{symbol}] API Response error! No data on {start_date} {start_time} to {end_date} {end_time}", success=False)
@@ -2420,22 +2547,22 @@ class LiveDataManager:
                     if hasattr(df, 'empty') and not df.empty:
                         self.insert_historical_data(df, symbol, interval, mode)
                     else:
-                        colored_log(self.logger, 'warning', f"[{symbol}] ⚠️ Empty Dataframe! No data on {start_date}", success=False)
+                        colored_log(self.logger, 'warning', f"[{symbol}] [WARNING] Empty Dataframe! No data on {start_date}", success=False)
                     return  # Exit function on success
                     
                 except Exception as retry_e:
                     if attempt < max_retries - 1:
                         wait_time = (2 ** attempt) + random.uniform(0, 1)
-                        colored_log(self.logger, 'warning', f"[{symbol}] ⏳ Error on attempt {attempt + 1}: {retry_e}, retrying in {wait_time:.1f}s...", success=False)
+                        colored_log(self.logger, 'warning', f"[{symbol}] [RETRY] Error on attempt {attempt + 1}: {retry_e}, retrying in {wait_time:.1f}s...", success=False)
                         time_module.sleep(wait_time)
                     else:
-                        colored_log(self.logger, 'error', f"[{symbol}] ❌ Failed after {max_retries} attempts: {retry_e}", success=False)
+                        colored_log(self.logger, 'error', f"[{symbol}] [FAILED] Failed after {max_retries} attempts: {retry_e}", success=False)
             
             # Add delay between requests to reduce server load
             time_module.sleep(random.uniform(0.1, 0.3))
 
         except Exception as e:
-            colored_log(self.logger, 'error', f"[{symbol}] ❌ Error during fetch: {e}", success=False)
+            colored_log(self.logger, 'error', f"[{symbol}] [ERROR] Error during fetch: {e}", success=False)
 
 
     def insert_historical_data(self, df, symbol, interval, mode):
@@ -2584,8 +2711,8 @@ class LiveDataManager:
     def stop_real_time_data(self):
         """Stop real-time data processing"""
         # Unsubscribe and disconnect from real-time data
-        self.api_client.unsubscribe_quote(self.instruments_list)
-        self.api_client.disconnect()
+        # self.api_client.unsubscribe_quote(self.instruments_list)
+        # self.api_client.disconnect()
 
         self.is_running = False
         if self.data_thread:
@@ -2608,8 +2735,8 @@ class LiveDataManager:
                     continue
 
                 # Try to use Kafka-based message processing first
-                if hasattr(self, 'consumer') and self.consumer:
-                    self._process_messages_non_blocking()
+                #if hasattr(self, 'consumer') and self.consumer:
+                self._process_messages_non_blocking()
 
                 # Check heartbeat every 60 seconds during market hours for all timeframes
                 current_time = time_module.time()
@@ -2650,7 +2777,10 @@ class LiveDataManager:
                         return False
                     
                     last_fetch = self._last_fetch_times[interval_key]
-                    if last_fetch is None or (current_time - last_fetch).total_seconds() >= 55:  # Allow 5s buffer
+                    # Calculate minimum time gap based on interval (e.g., 5m = 300s, 15m = 900s)
+                    min_gap_seconds = (interval_minutes * 60) - 10  # 10 second buffer before next interval
+                    
+                    if last_fetch is None or (current_time - last_fetch).total_seconds() >= min_gap_seconds:
                         self._last_fetch_times[interval_key] = current_time
                         return True
                     return False
@@ -2675,29 +2805,59 @@ class LiveDataManager:
                     else:
                         colored_log(self.logger, 'debug', "No active positions - skipping 1m data fetch", success=True)
 
-                # Fetch 5-min data
-                if should_fetch('5m', 5):
-                    start_time = (current_time - timedelta(minutes=6)).time().strftime('%H:%M:%S') # 6 minutes buffer
-                    #end_time = (current_time + timedelta(minutes=5)).time().strftime('%H:%M:%S')
-                    end_time = current_time.time().strftime('%H:%M:%S')
-
-                    colored_log(self.logger, 'info', f"Fetching 5m data for {len(self.symbols)} symbols in parallel. Current time: {current_time.time()}", success=True)
-                    
+                # Prepare data fetch tasks for parallel execution
+                fetch_5m = should_fetch('5m', 5)
+                fetch_15m = should_fetch('15m', 15)
+                
+                # Run 5m and 15m data fetching in parallel
+                if fetch_5m or fetch_15m:
                     date_str = current_date.strftime('%Y-%m-%d')
-                    self._fetch_data_parallel(self.symbols, '5m', date_str, start_time, end_time, current_time.time())
-                    colored_log(self.logger, 'info', "Loaded 5-min data for all symbols", success=True)                    
-
-                # Fetch 15-min data
-                if should_fetch('15m', 15):
-                    start_time = (current_time - timedelta(minutes=16)).time().strftime('%H:%M:%S') # 16 minutes buffer
-                    #end_time = (current_time + timedelta(minutes=15)).time().strftime('%H:%M:%S')
-                    end_time = current_time.time().strftime('%H:%M:%S')
-
-                    colored_log(self.logger, 'info', f"Fetching 15m data for {len(self.symbols)} symbols in parallel. Current time: {current_time.time()}", success=True)
+                    timeframe_tasks = []
                     
-                    date_str = current_date.strftime('%Y-%m-%d')
-                    self._fetch_data_parallel(self.symbols, '15m', date_str, start_time, end_time, current_time.time())
-                    colored_log(self.logger, 'info', "Loaded 15-min data for all symbols", success=True)
+                    if fetch_5m:
+                        start_time_5m = (current_time - timedelta(minutes=6)).time().strftime('%H:%M:%S') # 6 minutes buffer
+                        end_time_5m = current_time.time().strftime('%H:%M:%S')
+                        timeframe_tasks.append(('5m', start_time_5m, end_time_5m))
+                        colored_log(self.logger, 'info', f"Queuing 5m data fetch for {len(self.symbols)} symbols. Current time: {current_time.time()}", success=True)
+                    
+                    if fetch_15m:
+                        start_time_15m = (current_time - timedelta(minutes=16)).time().strftime('%H:%M:%S') # 16 minutes buffer
+                        end_time_15m = current_time.time().strftime('%H:%M:%S')
+                        timeframe_tasks.append(('15m', start_time_15m, end_time_15m))
+                        colored_log(self.logger, 'info', f"Queuing 15m data fetch for {len(self.symbols)} symbols. Current time: {current_time.time()}", success=True)
+                    
+                    # Execute timeframe fetches in parallel
+                    def fetch_timeframe_data(timeframe_info):
+                        """Fetch data for a specific timeframe"""
+                        interval, start_time, end_time = timeframe_info
+                        try:
+                            colored_log(self.logger, 'debug', f"Starting {interval} data fetch for {len(self.symbols)} symbols", success=True)
+                            # if interval == '15m':
+                            #     # Add NIFTY data to the symbols list
+                            #     symbols_with_nifty = self.symbols + ['NIFTY']
+                            # else:
+                            #     symbols_with_nifty = self.symbols
+                            symbols_with_nifty = self.symbols + ['NIFTY']
+                            self._fetch_data_parallel(symbols_with_nifty, interval, date_str, start_time, end_time, current_time.time())
+                            colored_log(self.logger, 'debug', f"Completed {interval} data fetch for all symbols", success=True)
+                            return f"[OK] {interval} fetch completed"
+                        except Exception as e:
+                            colored_log(self.logger, 'error', f"Error fetching {interval} data: {e}", success=False)
+                            return f"[FAIL] {interval} fetch failed: {e}"
+                    
+                    # Use ThreadPoolExecutor to run timeframe fetches in parallel
+                    with ThreadPoolExecutor(max_workers=2) as executor:  # Max 2 workers for 5m and 15m
+                        futures = [executor.submit(fetch_timeframe_data, task) for task in timeframe_tasks]
+                        
+                        # Wait for all timeframe fetches to complete
+                        for future in futures:
+                            try:
+                                result = future.result(timeout=120)  # 2 minute timeout per timeframe
+                                colored_log(self.logger, 'debug', f"Timeframe fetch result: {result}", success=True)
+                            except Exception as e:
+                                colored_log(self.logger, 'error', f"Timeframe fetch failed: {e}", success=False)
+                    
+                    colored_log(self.logger, 'info', f"Parallel timeframe data fetch completed for {len(timeframe_tasks)} timeframes", success=True)
 
         except Exception as e:
             colored_log(self.logger, 'error', f"Error in non-blocking message processing: {e}", success=False)
@@ -2711,15 +2871,25 @@ class LiveDataManager:
             try:
                 self.fetch_intraday_data(symbol, interval, self.api_client, date_str, date_str, start_time, end_time, 'recovery')
                 self.on_new_candle(symbol, interval, current_candle_time)
-                return f"✅ {symbol}"
+                
+                # Process entry signals only for 5m and 15m timeframes (strategy timeframes)
+                if interval in ['5m', '15m'] and self.process_entry:
+                    try:
+                        current_time = datetime.now(IST)
+                        # Call back to LiveTradingEngine to process entry signals
+                        self.process_entry(symbol, current_time)
+                    except Exception as entry_e:
+                        colored_log(self.logger, 'error', f"Error processing entry for {symbol} {interval}: {entry_e}", success=False)
+                
+                return f"[OK] {symbol}"
             except Exception as e:
                 colored_log(self.logger, 'error', f"Error fetching {interval} data for {symbol}: {e}", success=False)
-                return f"❌ {symbol}: {e}"
+                return f"[FAIL] {symbol}: {e}"
         
         start_parallel_time = time_module.time()
         
         # Use ThreadPoolExecutor for parallel processing
-        with ThreadPoolExecutor(max_workers=8) as executor:  # Limit concurrent requests
+        with ThreadPoolExecutor(max_workers=4) as executor:  # Limit concurrent requests
             futures = {executor.submit(fetch_single_symbol, symbol): symbol for symbol in symbols}
             results = []
             
@@ -2730,10 +2900,10 @@ class LiveDataManager:
                 except Exception as e:
                     symbol = futures[future]
                     colored_log(self.logger, 'error', f"Timeout/Error for {symbol} {interval}: {e}", success=False)
-                    results.append(f"❌ {symbol}: timeout/error")
+                    results.append(f"[FAIL] {symbol}: timeout/error")
         
         parallel_time = time_module.time() - start_parallel_time
-        successful_fetches = len([r for r in results if r.startswith('✅')])
+        successful_fetches = len([r for r in results if r.startswith('[OK]')])
         
         colored_log(self.logger, 'info', 
                   f"Parallel {interval} fetch completed: {successful_fetches}/{len(symbols)} symbols in {parallel_time:.2f}s", 
@@ -2998,8 +3168,7 @@ class LiveDataManager:
         try:
             query = f"""
                 SELECT time, open, high, low, close, volume,
-                       strategy_8, strategy_9, strategy_10, strategy_11, strategy_12,
-                       atr_10, volume_10, atr_14, volume_14, nifty_trend_15m, curbot, curtop, cum_intraday_volume
+                       strategy_8, strategy_9, strategy_10, strategy_11, strategy_12
                 FROM ohlc_{timeframe}
                 WHERE symbol = %s 
                 ORDER BY time DESC
@@ -3034,20 +3203,20 @@ class LiveDataManager:
             df_15m = self.get_latest_data(symbol, '15m', 1)
             if not df_15m.empty:
                 latest_15m = df_15m.iloc[-1]
-                # Latest time has to be within 16 minutes(15 minutes plus 1 minute buffer) of current time to avoid stale data
-                if latest_15m['time'] > datetime.now(IST) - timedelta(minutes=16):
-                    signals['strategy_8'] = latest_15m.get('strategy_8', False)
-                    signals['strategy_12'] = latest_15m.get('strategy_12', False)
+                # Latest time has to be within 16 minutes(15 minutes plus 2 minute buffer) of current time to avoid stale data
+                if latest_15m['time'] > datetime.now(IST) - timedelta(minutes=17):
+                    signals['strategy_8'] = bool(latest_15m.get('strategy_8', False))
+                    signals['strategy_12'] = bool(latest_15m.get('strategy_12', False))
             
             # Get latest 5m data
             df_5m = self.get_latest_data(symbol, '5m', 1)
             if not df_5m.empty:
                 latest_5m = df_5m.iloc[-1]
-                # Latest time has to be within 6 minutes(5 minutes plus 1 minute buffer) of current time to avoid stale data
-                if latest_5m['time'] > datetime.now(IST) - timedelta(minutes=6):
-                    signals['strategy_10'] = latest_5m.get('strategy_10', False)
-                    signals['strategy_11'] = latest_5m.get('strategy_11', False)
-                    signals['strategy_9'] = latest_5m.get('strategy_9', False)
+                # Latest time has to be within 6 minutes(5 minutes plus 2 minute buffer) of current time to avoid stale data
+                if latest_5m['time'] > datetime.now(IST) - timedelta(minutes=7):
+                    signals['strategy_10'] = bool(latest_5m.get('strategy_10', False))
+                    signals['strategy_11'] = bool(latest_5m.get('strategy_11', False))
+                    signals['strategy_9'] = bool(latest_5m.get('strategy_9', False))
             
         except Exception as e:
             colored_log(self.logger, 'error', f"Error getting signals for {symbol}: {e}", success=False)
@@ -3214,7 +3383,7 @@ class LiveTradingEngine:
         self.shutdown_event = threading.Event()      
         
         # Threading
-        self.scan_thread = None
+
         self.monitor_thread = None
         
         # Logging
@@ -3245,7 +3414,7 @@ class LiveTradingEngine:
 
         # Components
         self.position_manager = PositionManager(self.api_client, self.sl_pct, self.tp_pct, self.trail_activation_pct, self.trail_stop_gap_pct, self.trail_increment_pct, self.trading_start, self.trading_end, self.max_open_positions, self.max_daily_trades, self.max_strategy_trades_per_day)
-        self.data_manager = LiveDataManager(db_config, self.api_client, self.api_key, self.symbols, self.market_start, self.market_end, self.get_active_symbols)
+        self.data_manager = LiveDataManager(db_config, self.api_client, self.api_key, self.symbols, self.market_start, self.market_end, self.get_active_symbols, self._process_symbol_entry)
         self.order_manager = OrderManager(self.api_client)    
         
         colored_log(self.logger, 'info', f"LiveTradingEngine initialized for {len(symbols)} symbols", success=True)
@@ -3270,36 +3439,7 @@ class LiveTradingEngine:
         current_time = datetime.now(IST).time()
         return self.is_market_hours() and self.trading_start <= current_time <= self.trading_end
     
-    def scan_symbols(self):
-        """Main symbol scanning loop"""
-        colored_log(self.logger, 'info', "Starting symbol scanner", success=True)
-        
-        while not self.shutdown_event.is_set():
-            try:
-                if not self.is_trading_hours():
-                    colored_log(self.logger, 'info', "Outside trading hours, waiting...", success=True)
-                    time_module.sleep(30)
-                    continue
-                
-                current_time = datetime.now(IST)
-                colored_log(self.logger, 'debug', f"Scanning symbols at {current_time.strftime('%H:%M:%S')}", success=True)
-                
-                # Scan all symbols for entry signals
-                for symbol in self.symbols:
-                    if self.shutdown_event.is_set():
-                        break
-                    
-                    try:
-                        self._process_symbol_entry(symbol, current_time)
-                    except Exception as e:
-                        colored_log(self.logger, 'error', f"Error processing {symbol}: {e}", success=False)
-                
-                # Short delay between scans
-                time_module.sleep(20)  # 20 second scan frequency
-                
-            except Exception as e:
-                colored_log(self.logger, 'error', f"Error in symbol scanner: {e}", success=False)
-                time_module.sleep(5)
+
     
     def _process_symbol_entry(self, symbol, current_time):
         """Process entry signals for symbol"""
@@ -3311,6 +3451,10 @@ class LiveTradingEngine:
         
         # Get current signals
         signals = self.data_manager.get_current_signals(symbol)
+        
+        # Only log signals if any strategy is True (reduce log noise)
+        if any(signals.values()):
+            colored_log(self.logger, 'info', f"SIGNALS: {signals}", success=True)
         
         # Check for long entries (Strategy 12 and 11)
         long_signal = signals['strategy_12'] or signals['strategy_11']
@@ -3511,10 +3655,7 @@ class LiveTradingEngine:
         self.data_manager.start_real_time_data()
         
         # Start threads
-        self.scan_thread = threading.Thread(target=self.scan_symbols, daemon=True)
         self.monitor_thread = threading.Thread(target=self.monitor_positions, daemon=True)
-        
-        self.scan_thread.start()
         self.monitor_thread.start()
         
         colored_log(self.logger, 'info', "Live Trading Engine started successfully", success=True)
@@ -3533,8 +3674,7 @@ class LiveTradingEngine:
         self.data_manager.stop_real_time_data()
         
         # Wait for threads
-        if self.scan_thread:
-            self.scan_thread.join(timeout=10)
+
         if self.monitor_thread:
             self.monitor_thread.join(timeout=10)
         

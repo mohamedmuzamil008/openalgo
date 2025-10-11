@@ -34,7 +34,7 @@ def setup_logging(debug=False):
     
     # Create logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG if debug else logging.DEBUG)  # Set to lowest level to capture everything
+    root_logger.setLevel(logging.DEBUG if debug else logging.INFO)  # Set to lowest level to capture everything
     
     # Clear any existing handlers
     root_logger.handlers = []
@@ -44,7 +44,7 @@ def setup_logging(debug=False):
     
     # File Handler (captures all levels by default)
     file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(getattr(logging, LOG_CONFIG.get('file_level', 'DEBUG')))
+    file_handler.setLevel(getattr(logging, LOG_CONFIG.get('file_level', 'INFO')))
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
     
@@ -60,7 +60,7 @@ def setup_logging(debug=False):
     
     # Log the configuration
     logging.info("Logging system initialized")
-    logging.debug(f"File logging level: {LOG_CONFIG.get('file_level', 'DEBUG')}")
+    logging.debug(f"File logging level: {LOG_CONFIG.get('file_level', 'INFO')}")
     logging.debug(f"Console logging level: {LOG_CONFIG.get('console_level', 'INFO')}")
     if debug:
         logging.info("Debug mode enabled - capturing all log levels")
