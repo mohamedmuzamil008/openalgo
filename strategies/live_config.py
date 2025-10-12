@@ -27,8 +27,8 @@ TRADING_CONFIG = {
     # Market Hours (IST)
     'market_start': time(9, 15),
     'market_end': time(15, 30),
-    'trading_start': time(9, 20),  # Start 5 min after market open
-    'trading_end': time(15, 10),   # Stop 20 min before close
+    'trading_start': time(9, 29),  # Start 15 min after market open
+    'trading_end': time(15, 14),   # Stop 20 min before close
     
     # Position Sizing
     'capital': 10000,
@@ -38,13 +38,13 @@ TRADING_CONFIG = {
     # Risk Management
     'max_open_positions': 3,
     'max_daily_trades': 5,
-    'max_strategy_trades_per_day': 1,
+    'max_strategy_trades_per_day': 3,  # Allow 3 trades per day for same strategy (different symbols)
     
     # Trailing Stop
-    'trail_activation_pct': 0.9,  # Activate at 0.5% profit
+    'trail_activation_pct': 1.0,  # Activate at 0.5% profit
     'trail_stop_gap_pct': 0.2,
     'trail_increment_pct': 0.2,
-    'sl_pct': 1.5,
+    'sl_pct': 1.0,
     'tp_pct': 1.5,    
     
     # Scanning

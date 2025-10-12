@@ -50,7 +50,6 @@ class PositionManager:
         self.open_positions = {}  # {symbol: position_info}
         self.daily_trades = defaultdict(int)  # {date: count}
         self.daily_strategy_trades = defaultdict(lambda: defaultdict(int))  # {date: {strategy: count}}
-        self.daily_symbol_trades = defaultdict(set)  # {date: set(symbols)} - Track symbols traded per day
         self.sl_pct = sl_pct
         self.tp_pct = tp_pct
         self.trail_activation_pct = trail_activation_pct
@@ -118,17 +117,13 @@ class PositionManager:
                 if self.daily_trades[current_date] >= self.max_daily_trades:
                     return False, f"Max daily trades ({self.max_daily_trades}) reached"
                 
-                # Max 3 trades per strategy per day (across different symbols)
+                # Max 1 trade per strategy per day
                 if self.daily_strategy_trades[current_date][strategy] >= self.max_strategy_trades_per_day:
                     return False, f"Strategy {strategy} already used today ({self.max_strategy_trades_per_day} times)"
                 
-                # Cannot open position if already have position in this symbol (currently open)
+                # Cannot open position if already have position in this symbol
                 if symbol in self.open_positions:
-                    return False, f"Already have open position in {symbol}"
-                
-                # Cannot re-enter same symbol on the same day (even if previous position is closed)
-                if symbol in self.daily_symbol_trades[current_date]:
-                    return False, f"Already traded {symbol} today - no re-entry allowed"
+                    return False, f"Already have position in {symbol}"
                 
                 # Save state after validation
                 self.save_state()
@@ -163,7 +158,6 @@ class PositionManager:
             self.open_positions[symbol] = position_info
             self.daily_trades[current_date] += 1
             self.daily_strategy_trades[current_date][strategy] += 1
-            self.daily_symbol_trades[current_date].add(symbol)  # Track this symbol as traded today
 
             # Save state after position opened
             self.save_state()
@@ -222,7 +216,6 @@ class PositionManager:
                 'open_positions': self.open_positions,
                 'daily_trades': {str(k): v for k, v in self.daily_trades.items()},  # Convert date to string
                 'daily_strategy_trades': {str(k): v for k, v in self.daily_strategy_trades.items()},
-                'daily_symbol_trades': {str(k): list(v) for k, v in self.daily_symbol_trades.items()},  # Convert set to list
                 'trade_history': self.trade_history
             }
             
@@ -266,12 +259,6 @@ class PositionManager:
                 date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
                 for strategy, count in strategies.items():
                     self.daily_strategy_trades[date_obj][strategy] = count
-            
-            # Restore daily symbol trades
-            self.daily_symbol_trades = defaultdict(set)
-            for date_str, symbols in state.get('daily_symbol_trades', {}).items():
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-                self.daily_symbol_trades[date_obj] = set(symbols)  # Convert list back to set
                     
             # Restore trade history
             self.trade_history = state.get('trade_history', [])
@@ -490,6 +477,47 @@ class DatabaseManager:
             SELECT create_hypertable('ohlc_1m', 'time', if_not_exists => TRUE)
             """,
             """
+            CREATE TABLE IF NOT EXISTS ohlc_5m (
+                time TIMESTAMPTZ NOT NULL,
+                symbol VARCHAR(20) NOT NULL,                
+                open DECIMAL(18, 2),
+                high DECIMAL(18, 2),
+                low DECIMAL(18, 2),
+                close DECIMAL(18, 2),
+                volume BIGINT,
+                atr_10 DECIMAL(18, 2),
+                volume_10 BIGINT, 
+                close_10 DECIMAL(18, 2),
+                cum_sp_bullish INT,
+                sp_bullish_range_pct DECIMAL(18, 2),
+                cum_sp_bearish INT,
+                sp_bearish_range_pct DECIMAL(18, 2),
+                ema_50 DECIMAL(18, 2),
+                ema_100 DECIMAL(18, 2),
+                ema_200 DECIMAL(18, 2),
+                is_range_bullish BOOLEAN,
+                is_range_bearish BOOLEAN,
+                volume_range_pct_10 DECIMAL(18, 2),
+                cum_intraday_volume BIGINT,
+                today_range_pct_10 DECIMAL(18, 2),
+                nifty_trend_15m INT,                
+                strategy_8 BOOLEAN,
+                strategy_9 BOOLEAN,
+                strategy_10 BOOLEAN,
+                strategy_11 BOOLEAN,
+                strategy_12 BOOLEAN,
+                s_8 BOOLEAN,
+                s_9 BOOLEAN,
+                s_10 BOOLEAN,
+                s_11 BOOLEAN,
+                s_12 BOOLEAN,
+                PRIMARY KEY (time, symbol)
+            )
+            """,
+            """
+            SELECT create_hypertable('ohlc_5m', 'time', if_not_exists => TRUE)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS ohlc_15m (
                 time TIMESTAMPTZ NOT NULL,
                 symbol VARCHAR(20) NOT NULL,                
@@ -498,60 +526,48 @@ class DatabaseManager:
                 low DECIMAL(18, 2),
                 close DECIMAL(18, 2),
                 volume BIGINT,
-                daily_return DECIMAL(18, 5),
-                daily_atr_14 DECIMAL(18, 3),
-                daily_rsi_14 DECIMAL(18, 3),
-                daily_macd DECIMAL(18, 3),
-                daily_macd_signal DECIMAL(18, 3),
-                daily_ema_10 DECIMAL(18, 2),
-                daily_ema_20 DECIMAL(18, 2),
-                daily_ema_30 DECIMAL(18, 2),
-                daily_volatility_10 DECIMAL(18, 5),
-                daily_volatility_20 DECIMAL(18, 5),
-                daily_volatility_30 DECIMAL(18, 5),
-                daily_volume_10 DECIMAL(18, 2),
-                daily_volume_20 DECIMAL(18, 2),
-                daily_volume_30 DECIMAL(18, 2),
-                log_return DECIMAL(18, 5),
-                hl_range DECIMAL(18, 5),
-                body_ratio DECIMAL(18, 5),
-                change_since_day_open DECIMAL(18, 5),
-                change_since_prev_day_close DECIMAL(18, 5),
-                change_since_last_close DECIMAL(18, 5),
-                change_since_last_close_2 DECIMAL(18, 5),
-                change_since_last_close_3 DECIMAL(18, 5),   
-                volatility_50 DECIMAL(18, 5),
-                volatility_100 DECIMAL(18, 5),
-                volatility_200 DECIMAL(18, 5),
-                ema_50 DECIMAL(18, 3),
-                ema_100 DECIMAL(18, 3),
-                ema_200 DECIMAL(18, 3),
-                macd DECIMAL(18, 3),
-                macd_signal DECIMAL(18, 3),
-                rsi_14 DECIMAL(18, 3),
-                bollinger_bands_upper DECIMAL(18, 3),
-                bollinger_bands_middle DECIMAL(18, 3),
-                bollinger_bands_lower DECIMAL(18, 3),
-                adx DECIMAL(18, 3),
-                di_plus DECIMAL(18, 3),
-                di_minus DECIMAL(18, 3),
-                zl_macd_signal INT,
-                is_first_bullish_confirmed INT,
-                is_first_bearish_confirmed INT, 
-                sp_bullish_range_pct DECIMAL(18, 5),
-                sp_bearish_range_pct DECIMAL(18, 5),
+                atr_10 DECIMAL(18, 2),
+                volume_10 BIGINT,
+                close_10 DECIMAL(18, 2),
                 cum_sp_bullish INT,
+                sp_bullish_range_pct DECIMAL(18, 2),
                 cum_sp_bearish INT,
-                hour_sin DECIMAL(18, 5),
-                hour_cos DECIMAL(18, 5),
-                day_of_week INT,
-                strategy_8 INT,
-                s_8 INT,
+                sp_bearish_range_pct DECIMAL(18, 2),
+                zl_macd_signal INT,                
+                volume_range_pct_10 DECIMAL(18, 2),
+                cum_intraday_volume BIGINT,
+                today_range_pct_10 DECIMAL(18, 2),
+                nifty_trend_15m INT,
+                strategy_8 BOOLEAN,
+                strategy_9 BOOLEAN,
+                strategy_10 BOOLEAN,
+                strategy_11 BOOLEAN,
+                strategy_12 BOOLEAN,
+                s_8 BOOLEAN,
+                s_9 BOOLEAN,
+                s_10 BOOLEAN,
+                s_11 BOOLEAN,
+                s_12 BOOLEAN,
                 PRIMARY KEY (time, symbol)
             )
             """,
             """
             SELECT create_hypertable('ohlc_15m', 'time', if_not_exists => TRUE)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS ohlc_1h (
+                time TIMESTAMPTZ NOT NULL,
+                symbol VARCHAR(20) NOT NULL,                
+                open DECIMAL(18, 2),
+                high DECIMAL(18, 2),
+                low DECIMAL(18, 2),
+                close DECIMAL(18, 2),
+                volume BIGINT,
+                PRIMARY KEY (time, symbol)
+            )
+            """,
+            """
+            SELECT create_hypertable('ohlc_1h', 'time', if_not_exists => TRUE)
             """,
             """
             CREATE TABLE IF NOT EXISTS ohlc_D (
@@ -739,7 +755,7 @@ class HeartbeatMonitor:
         overall_status = True  # Initialize status at the start
         current_time = datetime.now(IST)  # Changed from UTC to IST to match market time
         
-        # Only check every 120 seconds
+        # Only check every 60 seconds
         if (current_time - self.last_check_time).total_seconds() < 120:
             return overall_status
             
@@ -753,6 +769,12 @@ class HeartbeatMonitor:
                     'interval': '1 minute',
                     'table': 'ohlc_1m',
                     'min_data_points': 5  # Expected data points in lookback period
+                },
+                '5m': {
+                    'lookback_minutes': 30,
+                    'interval': '5 minutes',
+                    'table': 'ohlc_5m',
+                    'min_data_points': 6  # Expected data points in lookback period
                 },
                 '15m': {
                     'lookback_minutes': 120,
@@ -776,7 +798,7 @@ class HeartbeatMonitor:
                         colored_log(self.logger, 'debug', f"No active positions - skipping 1m data continuity check", success=True)
                         continue
                 else:
-                    # For 15m timeframes, check all symbols (used for entry signals)
+                    # For 5m and 15m timeframes, check all symbols (used for entry signals)
                     symbols_to_check = self.symbols
                 # Calculate time range for this timeframe
                 # First, get the current time and align it to the previous completed interval
@@ -786,7 +808,7 @@ class HeartbeatMonitor:
                 if timeframe == '1m':
                     end_time = current_aligned - timedelta(minutes=1)
                 else:
-                    # For 15m: align to the previous completed interval
+                    # For 5m and 15m: align to the previous completed interval
                     interval_minutes = int(timeframe[:-1])
                     minutes_to_align = current_aligned.minute % interval_minutes
                     if minutes_to_align == 0:
@@ -1096,15 +1118,17 @@ class LiveDataManager:
         # colored_log(self.logger, 'info', f"Group ID: {self.consumer.config['group_id']}", success=True)
         # colored_log(self.logger, 'info', f"Brokers: {self.consumer.config['bootstrap_servers']}", success=True)
 
+        self.reset_aggregation_buffers()               
+        
         #self.db_manager.clean_database(db_config['dbname'])   
 
-        # Check if the database has last 45 days of data for all symbols. If not load the data.
-        symbols_needing_data = self.check_historical_data_loaded(45, self.symbols, ['15m', 'D'])
+        # Check if the database has last 21 days of data for all symbols. If not load the data.
+        symbols_needing_data = self.check_historical_data_loaded(21, self.symbols, ['5m', '15m', 'D'])
 
         if symbols_needing_data:
             # Initialize with historical data only for symbols that need it
             colored_log(self.logger, 'info', f"Loading historical data for {len(symbols_needing_data)} symbols: {symbols_needing_data}", success=True)
-            self._load_historical_data(45, symbols_needing_data, ['15m', 'D'])
+            self._load_historical_data(21, symbols_needing_data, ['5m', '15m', 'D'])
         else:
             colored_log(self.logger, 'info', "All symbols have complete historical data - skipping data loading", success=True)   
         
@@ -1218,7 +1242,7 @@ class LiveDataManager:
             symbols_to_recover = specific_symbols if specific_symbols else self.symbols
             
             # Determine which timeframes to recover
-            timeframes_to_recover = [timeframe] if timeframe else ['1m', '15m']
+            timeframes_to_recover = [timeframe] if timeframe else ['1m', '5m', '15m']
             
             colored_log(self.logger, 'warning', 
                        f"Attempting data recovery for timeframe(s): {timeframes_to_recover}, symbols: {symbols_to_recover}", 
@@ -1250,12 +1274,40 @@ class LiveDataManager:
         
         except Exception as e:
             colored_log(self.logger, 'error', f"Emergency recovery failed: {e}", success=False)
+            
+
+    def reset_aggregation_buffers(self):
+        """Initialize/reset aggregation buffers"""
+        with self.lock:
+            self.tick_buffer = {
+                '1m': {},
+                '5m': {},
+                '15m': {}
+            }
+            now = datetime.now(pytz.utc)
+            self.last_agg_time = {
+                '1m': self.floor_to_interval(now, 1),
+                '5m': self.floor_to_interval(now, 5),
+                '15m': self.floor_to_interval(now, 15)
+            }
+            self.aggregation_state = {
+                '1m': {},
+                '5m': {},
+                '15m': {}
+            }
+            
+            # Reset volume tracking
+            self.last_period_volume = {
+                '1m': {},
+                '5m': {},
+                '15m': {}
+            }   
     
     def on_new_candle(self, symbol, timeframe, candle):
         """Callback method when a new candle is formed
         This is called by MarketDataProcessor when a complete candle is formed"""
         try:
-            if timeframe == '15m':
+            if (timeframe == '5m' and symbol != 'NIFTY') or timeframe == '15m':
                 # Only recalculate indicators for completed candles
                 current_time = datetime.now()
                 start_date = current_time.date() - timedelta(days=21)  # Last 21 days for indicators
@@ -1270,7 +1322,7 @@ class LiveDataManager:
     
 
     def floor_to_interval(self, dt, minutes=1):
-        """Floor a datetime to the start of its minute/15m interval"""
+        """Floor a datetime to the start of its minute/5m/15m interval"""
         discard = timedelta(
             minutes=dt.minute % minutes,
             seconds=dt.second,
@@ -1279,10 +1331,10 @@ class LiveDataManager:
         return dt - discard
         
     def _load_historical_data(self, days, symbols, intervals, purpose='general'):
-        """Load last 45 days data and clear existing intraday data"""
+        """Load last 21 days data and clear existing intraday data"""
         try:                   
             
-            # Calculate date range (last 45 days)
+            # Calculate date range (last 21 days)
             # End date is yesterday if the weekday is other than Monday
             # If its monday, then end date should be last friday
             end_date = datetime.now().date() - timedelta(days=1) if datetime.now().weekday() != 0 else datetime.now().date() - timedelta(days=3)
@@ -1354,14 +1406,28 @@ class LiveDataManager:
             
         except Exception as e:
             colored_log(self.logger, 'error', f"Error fetching {symbol} {interval}: {e}", success=False)
-            raise   
+            raise
+    
+    def _process_symbol_post_fetch(self, symbol, start_date, end_date):
+        """Process symbol after data fetch - calculate indicators"""
+        try:
+            # Calculate and store indicators for all timeframes
+            self._calculate_and_store_indicators(symbol, start_date, end_date, "post_fetch")
+            
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error post-processing {symbol}: {e}", success=False)
+            raise
+    
     
     def _calculate_and_store_indicators(self, symbol, start_date, end_date, mode):
         """Calculate and store indicators for all timeframes - OPTIMIZED for real-time updates"""
         try:
-            # Check if this is a real-time update (15m mode) - use optimized approach
-            if mode in ['15m']:
+            # Check if this is a real-time update (5m or 15m mode) - use optimized approach
+            if mode in ['5m', '15m']:
                 self._calculate_indicators_incremental(symbol, mode)
+            else:
+                # Full calculation for initial load or post_fetch mode
+                self._calculate_indicators_full(symbol, start_date, end_date, mode)
                     
         except Exception as e:
             colored_log(self.logger, 'error', f"Error calculating indicators for {symbol}: {e}", success=False)
@@ -1371,7 +1437,9 @@ class LiveDataManager:
         try:
             # Get minimal historical data needed for indicator calculations
             if timeframe == '15m':
-                lookback_days = 15
+                lookback_days = 21
+            elif timeframe == '5m':
+                lookback_days = 10
             else:
                 lookback_days = 1
 
@@ -1380,13 +1448,14 @@ class LiveDataManager:
             
             # Fetch only necessary data
             df_current = self.fetch_lookback_data(start_date, end_date, timeframe, symbol)
+            df_nifty_15m = self.fetch_lookback_data(end_date - timedelta(days=20), end_date, 'nifty_15m', 'NIFTY')
             
-            if df_current.empty:
+            if df_current.empty or df_nifty_15m.empty:
                 colored_log(self.logger, 'warning', f"Missing data for incremental indicator calculation: {symbol} {timeframe}", success=False)
                 return
             
             # Calculate indicators for the full dataset (needed for rolling/ewm calculations)
-            df_with_indicators = self._calculate_indicators_for_timeframe(df_current, symbol, timeframe)
+            df_with_indicators = self._calculate_indicators_for_timeframe(df_current, df_nifty_15m, symbol, timeframe)
             
             if not df_with_indicators.empty:
                 # Only update the database with the LATEST record (most recent candle)
@@ -1396,6 +1465,36 @@ class LiveDataManager:
             
         except Exception as e:
             colored_log(self.logger, 'error', f"Error in incremental indicator calculation for {symbol} {timeframe}: {e}", success=False)
+
+    def _calculate_indicators_full(self, symbol, start_date, end_date, mode):
+        """Full indicator calculation for initial loads - ORIGINAL APPROACH"""
+        try:                       
+            df_all_dict  = {
+            '15m': self.fetch_lookback_data(end_date- timedelta(days=21), end_date, '15m', symbol),
+            '5m': self.fetch_lookback_data(end_date- timedelta(days=10), end_date, '5m', symbol),
+            '1m': self.fetch_lookback_data(end_date- timedelta(days=1) , end_date, '1m', symbol),
+            'd': self.fetch_lookback_data(start_date - timedelta(days=20), end_date, 'd', symbol),
+            'nifty_15m': self.fetch_lookback_data(start_date - timedelta(days=20), end_date, 'nifty_15m', 'NIFTY'),
+            }
+
+            # Calculate indicators
+            try:
+                symbol_data_with_indicators = self.calculate_all_indicators_once(df_all_dict, symbol)
+            except Exception as e:
+                colored_log(self.logger, 'error', f"Error in calculate_all_indicators_once for {symbol}: {e}", success=False)
+                raise
+                        
+            # Update database with indicators
+            for timeframe, df in symbol_data_with_indicators.items():
+                if mode == "post_fetch" and (timeframe == '5m' or timeframe == '15m'):
+                    if not df.empty:
+                        self._update_indicators_in_db(df, symbol, timeframe)
+                elif (mode == '5m' or mode == '15m') and timeframe == mode:
+                    if not df.empty:
+                        self._update_indicators_in_db(df, symbol, timeframe)                
+                    
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error calculating indicators for {symbol}: {e}", success=False)
 
     def _load_daily_indicators_cache(self):
         """Load daily indicators for all symbols once per session (optimization)"""
@@ -1408,24 +1507,18 @@ class LiveDataManager:
             for symbol in self.symbols:
                 try:
                     # Get daily data for this symbol
-                    df_daily = self.fetch_lookback_data(end_date - timedelta(days=45), end_date, 'd', symbol)
+                    df_daily = self.fetch_lookback_data(end_date - timedelta(days=30), end_date, 'd', symbol)
                     
                     if not df_daily.empty:
                         # Calculate daily indicators
-                        df_daily['daily_return'] = df_daily['close'].pct_change()   
-                        df_daily['daily_atr_14'] = talib.ATR(df_daily['high'], df_daily['low'], df_daily['close'], timeperiod=14)
-                        df_daily['daily_rsi_14'] = talib.RSI(df_daily['close'], timeperiod=14)
-                        df_daily['daily_macd'], df_daily['daily_macd_signal'], _ = talib.MACD(df_daily['close'], fastperiod=12, slowperiod=26, signalperiod=9)
-                        df_daily['daily_ema_10'] = df_daily['close'].ewm(span=10, adjust=False).mean()
-                        df_daily['daily_ema_20'] = df_daily['close'].ewm(span=20, adjust=False).mean()
-                        df_daily['daily_ema_30'] = df_daily['close'].ewm(span=30, adjust=False).mean()
-                        df_daily['daily_volatility_10'] = df_daily['daily_return'].rolling(10).std()
-                        df_daily['daily_volatility_20'] = df_daily['daily_return'].rolling(20).std()
-                        df_daily['daily_volatility_30'] = df_daily['daily_return'].rolling(30).std()
-                        df_daily['daily_volume_10'] = df_daily['volume'].rolling(10).mean()
-                        df_daily['daily_volume_20'] = df_daily['volume'].rolling(20).mean()
-                        df_daily['daily_volume_30'] = df_daily['volume'].rolling(30).mean()
-                        df_daily['prev_day_close'] = df_daily['close']
+                        df_daily['prev_close'] = df_daily['close'].shift(1)
+                        df_daily['tr1'] = df_daily['high'] - df_daily['low']
+                        df_daily['tr2'] = abs(df_daily['high'] - df_daily['prev_close'])
+                        df_daily['tr3'] = abs(df_daily['low'] - df_daily['prev_close'])
+                        df_daily['tr'] = df_daily[['tr1', 'tr2', 'tr3']].max(axis=1)
+                        df_daily['atr_10'] = df_daily['tr'].ewm(span=10, adjust=False).mean()
+                        df_daily['volume_10'] = df_daily['volume'].rolling(window=10).mean()
+                        df_daily['close_10'] = df_daily['close'].rolling(window=10).mean()
                         df_daily['date'] = df_daily['time'].dt.date
                         
                         # Use the latest available daily data (yesterday during trading hours)
@@ -1435,21 +1528,9 @@ class LiveDataManager:
                         
                         # Cache the indicators for this symbol
                         self.daily_indicators_cache[symbol] = {
-                            'daily_return': latest_daily['daily_return'],
-                            'daily_atr_14': latest_daily['daily_atr_14'],
-                            'daily_rsi_14': latest_daily['daily_rsi_14'],
-                            'daily_macd': latest_daily['daily_macd'],
-                            'daily_macd_signal': latest_daily['daily_macd_signal'],
-                            'daily_ema_10': latest_daily['daily_ema_10'],
-                            'daily_ema_20': latest_daily['daily_ema_20'],
-                            'daily_ema_30': latest_daily['daily_ema_30'],
-                            'daily_volatility_10': latest_daily['daily_volatility_10'],
-                            'daily_volatility_20': latest_daily['daily_volatility_20'],
-                            'daily_volatility_30': latest_daily['daily_volatility_30'],
-                            'daily_volume_10': latest_daily['daily_volume_10'],
-                            'daily_volume_20': latest_daily['daily_volume_20'],
-                            'daily_volume_30': latest_daily['daily_volume_30'],
-                            'prev_day_close': latest_daily['prev_day_close'],
+                            'atr_10': latest_daily['atr_10'],
+                            'volume_10': latest_daily['volume_10'],
+                            'close_10': latest_daily['close_10'],
                             'date': latest_daily['date']
                         }
                         
@@ -1466,70 +1547,80 @@ class LiveDataManager:
         except Exception as e:
             colored_log(self.logger, 'error', f"Error loading daily indicators cache: {e}", success=False)
 
-    def    _calculate_indicators_for_timeframe(self, df_current, symbol, timeframe):
+    def _calculate_indicators_for_timeframe(self, df_current, df_nifty_15m, symbol, timeframe):
         """Calculate indicators for a specific timeframe - optimized for latest candle updates"""
         try:
             # Ensure time columns are datetime
-            for df in [df_current]:
+            for df in [df_current, df_nifty_15m]:
                 if not df.empty:
                     df['time'] = pd.to_datetime(df['time'])
             
             # Daily indicators are now cached - no need to recalculate
             
+            # Calculate nifty 15m indicators (needed for merging)
+            if not df_nifty_15m.empty:
+                df_nifty_15m['date'] = df_nifty_15m['time'].dt.date
+                df_nifty_15m['nifty_15m_ema_50'] = df_nifty_15m['close'].ewm(span=50, adjust=False).mean()
+                df_nifty_15m['nifty_15m_ema_200'] = df_nifty_15m['close'].ewm(span=200, adjust=False).mean()
+                df_nifty_15m['nifty_15m_adx'] = talib.ADX(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+                df_nifty_15m['nifty_15m_+DI'] = talib.PLUS_DI(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+                df_nifty_15m['nifty_15m_-DI'] = talib.MINUS_DI(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+                df_nifty_15m['nifty_15m_MACD'], df_nifty_15m['nifty_15m_MACD_Signal'], _ = talib.MACD(df_nifty_15m['close'], fastperiod=20, slowperiod=50, signalperiod=10)
+                df_nifty_15m['nifty_trend_15m'] = df_nifty_15m.apply(self.classify_trend, args=('15m',), axis=1)
+                df_nifty_15m = df_nifty_15m.groupby('date').last().reset_index()
+                #df_nifty_15m['nifty_trend_15m'] = df_nifty_15m['nifty_trend_15m'].shift(1)
+            
             # Calculate current timeframe indicators
             if not df_current.empty:
                 df_current = df_current.copy()  # Ensure we work with a copy
                 df_current['date'] = df_current['time'].dt.date
-                df_current = df_current[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].copy() 
-                #df_current.rename(columns={'time': 'timestamp'}, inplace=True)
-
-                # General features
-                df_current['return'] = df_current['close'].pct_change()
-                df_current['log_return'] = np.log1p(df_current['return'])
-                df_current['hl_range'] = (df_current['high'] - df_current['low']) / df_current['close']
-                df_current['body_ratio'] = (df_current['close'] - df_current['open']) / (df_current['high'] - df_current['low'] + 1e-9)
-
-                # Changes from previous day close and previous candle close
-                df_current['day_open'] = df_current.groupby('date')['open'].transform('first')
-                df_current['change_since_day_open'] = (df_current['close'] - df_current['day_open']) / df_current['day_open']
-                df_current['change_since_prev_day_close'] = (df_current['close'] - df_current['prev_day_close']) / df_current['prev_day_close']
-                df_current['change_since_last_close'] = (df_current['close'] - df_current['close'].shift(1)) / df_current['close'].shift(1)
-                df_current['change_since_last_close_2'] = (df_current['close'] - df_current['close'].shift(2)) / df_current['close'].shift(2)
-                df_current['change_since_last_close_3'] = (df_current['close'] - df_current['close'].shift(3)) / df_current['close'].shift(3)
-
-                # Rolling stats    
-                df_current['volatility_50'] = df_current['return'].rolling(50).std()
-                df_current['volatility_100'] = df_current['return'].rolling(100).std()
-                df_current['volatility_200'] = df_current['return'].rolling(200).std()
-                df_current['ema_50'] = df_current['close'].ewm(span=50, adjust=False).mean()
-                df_current['ema_100'] = df_current['close'].ewm(span=100, adjust=False).mean()
-                df_current['ema_200'] = df_current['close'].ewm(span=200, adjust=False).mean()    #
-
-                df_current['macd'], df_current['macd_signal'], _ = talib.MACD(df_current['close'], fastperiod=12, slowperiod=26, signalperiod=9)
-
-                df_current['rsi_14'] = talib.RSI(df_current['close'], timeperiod=14)
-
-                df_current['bollinger_bands_upper'], df_current['bollinger_bands_middle'], df_current['bollinger_bands_lower'] = talib.BBANDS(df_current['close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
-
-                df_current['adx'] = talib.ADX(df_current['high'], df_current['low'], df_current['close'], timeperiod=14)
-                df_current['di_plus'] = talib.PLUS_DI(df_current['high'], df_current['low'], df_current['close'], timeperiod=14)
-                df_current['di_minus'] = talib.MINUS_DI(df_current['high'], df_current['low'], df_current['close'], timeperiod=14)
-
-                # === ZERO LAG MACD ===
-                fast_period, slow_period, signal_period = 12, 26, 9
-                df_current['fast_zlema'] = self.zero_lag_ema(df_current['close'], fast_period)
-                df_current['slow_zlema'] = self.zero_lag_ema(df_current['close'], slow_period)
-                df_current['zl_macd'] = df_current['fast_zlema'] - df_current['slow_zlema']
-                df_current['zl_signal'] = df_current['zl_macd'].ewm(span=signal_period, adjust=False).mean()
-                df_current['zl_hist'] = df_current['zl_macd'] - df_current['zl_signal']
-                df_current['zl_macd_signal'] = 0
-                df_current.loc[(df_current['zl_macd'] > df_current['zl_signal']) & 
-                        (df_current['zl_macd'].shift(1) <= df_current['zl_signal'].shift(1)), 'zl_macd_signal'] = 1
-                df_current.loc[(df_current['zl_macd'] < df_current['zl_signal']) & 
-                        (df_current['zl_macd'].shift(1) >= df_current['zl_signal'].shift(1)), 'zl_macd_signal'] = -1
-                df_current.drop(['fast_zlema', 'slow_zlema', 'zl_macd', 'zl_signal', 'zl_hist'], axis=1, inplace=True)
+                df_current = df_current[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].copy()
                 
-                # === SINGLE PRINT CALCULATIONS  ===
+                if timeframe == '5m':
+                    for period in [50, 100, 200]:
+                        df_current.loc[:, f'ema_{period}'] = df_current['close'].ewm(span=period, adjust=False).mean()
+                    # Only keep today's date before calculating single prints
+                    df_current = df_current[df_current['date'] == datetime.now(IST).date()].reset_index(drop=True)
+                    # Calculate range
+                    df_current['range'] = df_current['high'] - df_current['low']
+                    df_current['avg_range_all'] = df_current.groupby('date')['range'].expanding().mean().reset_index(level=0, drop=True)
+                    try:
+                        avg_ex_first_30min_5m = df_current.groupby('date').apply(self.exclude_first_30min)
+                        if isinstance(avg_ex_first_30min_5m, pd.DataFrame):
+                            avg_ex_first_30min_5m = avg_ex_first_30min_5m.iloc[:, 0]
+                        avg_ex_first_30min_5m = avg_ex_first_30min_5m.reset_index(level=0, drop=True)
+                        df_current['avg_range_ex_first_30min'] = avg_ex_first_30min_5m.reindex(df_current.index).ffill()
+                    except Exception as e:
+                        self.logger.warning(f"Error calculating avg_range_ex_first_30min for 5m: {e}, using avg_range_all instead")
+                        df_current['avg_range_ex_first_30min'] = df_current['avg_range_all']
+                    # Create a mask for first 30 minutes (3:45 to 4:15 UTC)
+                    first_30min_mask = (
+                        (df_current['time'].dt.time >= time(3, 45)) & 
+                        (df_current['time'].dt.time < time(4, 15))
+                    )
+                    
+                    # For first 30 minutes, use rolling average of today's ranges
+                    # For after 30 minutes, use avg_range_ex_first_30min
+                    avg_range_for_comparison = df_current['avg_range_ex_first_30min'].copy()
+                    avg_range_for_comparison.loc[first_30min_mask] = df_current.loc[first_30min_mask, 'avg_range_all']
+                    
+                    df_current['is_range_bullish'] = (
+                        (df_current['range'] > 0.7 * avg_range_for_comparison) & 
+                        (df_current['close'] > df_current['open']) & 
+                        (df_current['close'] > (((df_current['high'] - df_current['open']) * 0.5) + df_current['open']))
+                    )
+                    df_current['is_range_bearish'] = (
+                        (df_current['range'] > 0.7 * avg_range_for_comparison) & 
+                        (df_current['close'] < df_current['open']) & 
+                        (df_current['close'] < (((df_current['open'] - df_current['low']) * 0.5) + df_current['low']))
+                    )                   
+                            
+                if timeframe == '15m':
+                    df_current = self._calculate_zlema_macd(df_current)
+                    # Only keep today's date before calculating single prints
+                    df_current = df_current[df_current['date'] == datetime.now(IST).date()].reset_index(drop=True)
+
+                # Calculate single prints
                 df_current['is_first_bullish_confirmed'] = False
                 df_current['is_first_bearish_confirmed'] = False
                 df_current['candle_count'] = df_current.groupby(df_current['date']).cumcount() + 1
@@ -1551,12 +1642,12 @@ class LiveDataManager:
                 # Mark first confirmations
                 bullish_conf = df_current[df_current['sp_confirmed_bullish']]
                 bearish_conf = df_current[df_current['sp_confirmed_bearish']]
-                first_bullish_idx_15m = bullish_conf.groupby('date').head(1).index
-                first_bearish_idx_15m = bearish_conf.groupby('date').head(1).index
-                df_current.loc[first_bullish_idx_15m, 'is_first_bullish_confirmed'] = True
-                df_current.loc[first_bearish_idx_15m, 'is_first_bearish_confirmed'] = True
+                first_bullish_idx = bullish_conf.groupby('date').head(1).index
+                first_bearish_idx = bearish_conf.groupby('date').head(1).index
+                df_current.loc[first_bullish_idx, 'is_first_bullish_confirmed'] = True
+                df_current.loc[first_bearish_idx, 'is_first_bearish_confirmed'] = True
                 
-                # SP levels for 15m
+                # SP levels
                 sp_levels_bullish = df_current[df_current['is_first_bullish_confirmed']][['date', 'close', 'cum_high_prev']]
                 sp_levels_bearish = df_current[df_current['is_first_bearish_confirmed']][['date', 'close', 'cum_low_prev']]
                 sp_levels_bullish['sp_high_bullish'] = sp_levels_bullish['close']
@@ -1566,81 +1657,60 @@ class LiveDataManager:
                 sp_levels_bullish.drop(['close', 'cum_high_prev'], axis=1, inplace=True)
                 sp_levels_bearish.drop(['close', 'cum_low_prev'], axis=1, inplace=True)
                 
-                # Merge back for 15m
+                # Merge back
                 df_current = df_current.merge(sp_levels_bullish, on='date', how='left')
                 df_current = df_current.merge(sp_levels_bearish, on='date', how='left')
                 
-                # Forward fill SP levels for 15m
+                # Forward fill SP levels
                 df_current['sp_high_bullish'] = df_current.groupby('date')['sp_high_bullish'].transform(lambda x: x.ffill() if x.notna().any() else x)
                 df_current['sp_low_bullish'] = df_current.groupby('date')['sp_low_bullish'].transform(lambda x: x.ffill() if x.notna().any() else x)
                 df_current['sp_high_bearish'] = df_current.groupby('date')['sp_high_bearish'].transform(lambda x: x.ffill() if x.notna().any() else x)
                 df_current['sp_low_bearish'] = df_current.groupby('date')['sp_low_bearish'].transform(lambda x: x.ffill() if x.notna().any() else x)
                 
-                # Set pre-confirmation values to NaN for 15m
+                # Set pre-confirmation values to NaN
                 df_current.loc[~df_current['sp_confirmed_bullish'].cummax(), ['sp_high_bullish', 'sp_low_bullish']] = None
                 df_current.loc[~df_current['sp_confirmed_bearish'].cummax(), ['sp_high_bearish', 'sp_low_bearish']] = None
                 
-                # Calculate SP range percentages for 15m
+                # Calculate SP range percentages
                 df_current['sp_bullish_range_pct'] = (df_current['sp_high_bullish'] - df_current['sp_low_bullish']) / df_current['sp_low_bullish'] * 100
                 df_current['sp_bearish_range_pct'] = (df_current['sp_high_bearish'] - df_current['sp_low_bearish']) / df_current['sp_low_bearish'] * 100
                 df_current['cum_sp_bullish'] = df_current.groupby('date')['sp_confirmed_bullish'].cumsum()
                 df_current['cum_sp_bearish'] = df_current.groupby('date')['sp_confirmed_bearish'].cumsum()
-                df_current.drop(['candle_count', 'cum_high_prev', 'cum_low_prev', 'cum_high', 'cum_low', 'sp_confirmed_bullish', 'sp_confirmed_bearish', 'sp_high_bullish', 'sp_low_bullish', 'sp_high_bearish', 'sp_low_bearish'], axis=1, inplace=True)
-                
-                # Change from bool to int
-                df_current['is_first_bullish_confirmed'] = df_current['is_first_bullish_confirmed'].astype(int)
-                df_current['is_first_bearish_confirmed'] = df_current['is_first_bearish_confirmed'].astype(int)
 
-                # Time features
-                df_current['hour'] = df_current['time'].dt.hour + df_current['time'].dt.minute/60
-                df_current['hour_sin'] = np.sin(2 * np.pi * df_current['hour'] / 24)
-                df_current['hour_cos'] = np.cos(2 * np.pi * df_current['hour'] / 24)
-                df_current['day_of_week'] = df_current['time'].dt.dayofweek           
-                
                 # Merge with daily data
                 # Use cached daily indicators (optimized - same values throughout session)
                 if symbol in self.daily_indicators_cache:
                     cached_daily = self.daily_indicators_cache[symbol]
-                    df_current['daily_return'] = cached_daily['daily_return']
-                    df_current['daily_atr_14'] = cached_daily['daily_atr_14']
-                    df_current['daily_rsi_14'] = cached_daily['daily_rsi_14']
-                    df_current['daily_macd'] = cached_daily['daily_macd']
-                    df_current['daily_macd_signal'] = cached_daily['daily_macd_signal']
-                    df_current['daily_ema_10'] = cached_daily['daily_ema_10']
-                    df_current['daily_ema_20'] = cached_daily['daily_ema_20']
-                    df_current['daily_ema_30'] = cached_daily['daily_ema_30']
-                    df_current['daily_volatility_10'] = cached_daily['daily_volatility_10']
-                    df_current['daily_volatility_20'] = cached_daily['daily_volatility_20']
-                    df_current['daily_volatility_30'] = cached_daily['daily_volatility_30']
-                    df_current['daily_volume_10'] = cached_daily['daily_volume_10']
-                    df_current['daily_volume_20'] = cached_daily['daily_volume_20']
-                    df_current['daily_volume_30'] = cached_daily['daily_volume_30']
-                    df_current['prev_day_close'] = cached_daily['prev_day_close']
+                    df_current['atr_10'] = cached_daily['atr_10']
+                    df_current['volume_10'] = cached_daily['volume_10'] 
+                    df_current['close_10'] = cached_daily['close_10']
                 else:
                     colored_log(self.logger, 'warning', f"No cached daily indicators for {symbol}, using default values", success=False)
                     # Fallback to safe default values to prevent crashes
-                    df_current['daily_return'] = 1.0  # Minimum daily return to prevent division by zero
-                    df_current['daily_atr_14'] = 1.0  # Minimum ATR to prevent division by zero
-                    df_current['daily_rsi_14'] = 1.0  # Minimum RSI to prevent division by zero
-                    df_current['daily_macd'] = 1.0  # Minimum MACD to prevent division by zero
-                    df_current['daily_macd_signal'] = 1.0  # Minimum MACD signal to prevent division by zero
-                    df_current['daily_ema_10'] = 1.0  # Minimum EMA to prevent division by zero
-                    df_current['daily_ema_20'] = 1.0  # Minimum EMA to prevent division by zero
-                    df_current['daily_ema_30'] = 1.0  # Minimum EMA to prevent division by zero
-                    df_current['daily_volatility_10'] = 1.0  # Minimum volatility to prevent division by zero
-                    df_current['daily_volatility_20'] = 1.0  # Minimum volatility to prevent division by zero
-                    df_current['daily_volatility_30'] = 1.0  # Minimum volatility to prevent division by zero
-                    df_current['daily_volume_10'] = 1.0  # Minimum volume to prevent division by zero
-                    df_current['daily_volume_20'] = 1.0  # Minimum volume to prevent division by zero
-                    df_current['daily_volume_30'] = 1.0  # Minimum volume to prevent division by zero
-                    df_current['prev_day_close'] = 1.0  # Minimum previous day close to prevent division by zero                
-               
+                    df_current['atr_10'] = 1.0  # Minimum ATR to prevent division by zero
+                    df_current['volume_10'] = df_current['volume'].mean() if not df_current.empty else 1000
+                    df_current['close_10'] = df_current['close'].mean() if not df_current.empty else 100                
+                
+                # Merge with nifty 15m data
+                # Use the latest available nifty 15m
+                if not df_nifty_15m.empty:
+                    latest_nifty = df_nifty_15m.iloc[-1]
+                    df_current['nifty_trend_15m'] = latest_nifty['nifty_trend_15m']
+                
+                # VOLUME AND RANGE CALCULATIONS
+                df_current['cum_intraday_volume'] = df_current.groupby('date')['volume'].cumsum()
+                df_current['curtop'] = df_current.groupby('date')['high'].cummax()
+                df_current['curbot'] = df_current.groupby('date')['low'].cummin()
+                df_current['today_range'] = df_current['curtop'] - df_current['curbot']
+                df_current['today_range_pct_10'] = df_current['today_range'] / df_current['atr_10']
+                df_current['volume_range_pct_10'] = (df_current['cum_intraday_volume'] / df_current['volume_10']) / df_current['today_range_pct_10']
+                
                 # STRATEGY DEFINITIONS
                 # Initialize all strategy columns with False
-                for strategy_num in [8]:
+                for strategy_num in [8, 9, 10, 11, 12]:
                     df_current[f'strategy_{strategy_num}'] = False
                 
-                # Strategies 8 - only for 15m timeframe
+                # Strategies 8 and 12 - only for 15m timeframe
                 if timeframe == '15m':
                     df_current['s_8'] = (
                         (df_current['time'].dt.time >= time(4, 0)) & 
@@ -1654,8 +1724,77 @@ class LiveDataManager:
                         (df_current['nifty_trend_15m'] >= 0)
                     )
                     first_true_idx_8 = df_current[df_current['s_8']].groupby('date').head(1).index
-                    df_current.loc[first_true_idx_8, 'strategy_8'] = True                     
+                    df_current.loc[first_true_idx_8, 'strategy_8'] = True
+                    
+                    df_current['s_12'] = (
+                        (df_current['time'].dt.time >= time(4, 0)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bearish'] >= 1) & 
+                        (df_current['sp_bearish_range_pct'] > 1) & 
+                        (df_current['zl_macd_signal'] == 1) &
+                        (df_current['volume_range_pct_10'] > 0) &
+                        (df_current['volume_range_pct_10'] < 0.4) &
+                        (df_current['atr_10'] / df_current['close_10'] < 0.04) &
+                        (df_current['nifty_trend_15m'] <= 0)
+                    )
+                    first_true_idx_12 = df_current[df_current['s_12']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_12, 'strategy_12'] = True
                 
+                # Strategies 9, 10, and 11 - only for 5m timeframe
+                if timeframe == '5m':
+                    df_current['s_10'] = (
+                        (df_current['time'].dt.time >= time(3, 50)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bearish'] >= 1) & 
+                        (df_current['sp_bearish_range_pct'] > 0.6) & 
+                        (df_current['close'] < df_current['ema_50']) & 
+                        (df_current['close'] < df_current['ema_100']) & 
+                        (df_current['close'] < df_current['ema_200']) & 
+                        (df_current['is_range_bearish']) & 
+                        (df_current['volume_range_pct_10'] > 0.3) & 
+                        (df_current['volume_range_pct_10'] < 0.7) & 
+                        (df_current['atr_10'] / df_current['close_10'] > 0.04) &            
+                        (df_current['nifty_trend_15m'] != 1)
+                    )
+                    first_true_idx_10 = df_current[df_current['s_10']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_10, 'strategy_10'] = True
+                    
+                    df_current['s_11'] = (
+                        (df_current['time'].dt.time >= time(3, 50)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bullish'] >= 1) & 
+                        (df_current['sp_bullish_range_pct'] > 0.8) & 
+                        (df_current['close'] > df_current['ema_50']) & 
+                        (df_current['close'] > df_current['ema_100']) & 
+                        (df_current['close'] > df_current['ema_200']) & 
+                        (df_current['is_range_bullish']) & 
+                        (df_current['volume_range_pct_10'] > 0) & 
+                        (df_current['volume_range_pct_10'] < 0.3) &
+                        (df_current['atr_10'] / df_current['close_10'] > 0.04) &
+                        (df_current['nifty_trend_15m'] != -1)
+                    )
+                    first_true_idx_11 = df_current[df_current['s_11']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_11, 'strategy_11'] = True
+
+                    df_current['s_9'] = (
+                        (df_current['time'].dt.time >= time(3, 50)) & 
+                        (df_current['time'].dt.time < time(8, 15)) & 
+                        (df_current['cum_sp_bullish'] >= 1) & 
+                        (df_current['sp_bullish_range_pct'] > 0.8) & 
+                        (df_current['close'] > df_current['ema_50']) & 
+                        (df_current['close'] > df_current['ema_100']) & 
+                        (df_current['close'] > df_current['ema_200']) & 
+                        (df_current['is_range_bullish']) & 
+                        (df_current['volume_range_pct_10'] > 0.3) & 
+                        (df_current['volume_range_pct_10'] < 0.6) &
+                        (df_current['atr_10'] / df_current['close_10'] < 0.04) &
+                        (df_current['nifty_trend_15m'] != 1)
+                    )
+                    first_true_idx_9 = df_current[df_current['s_9']].groupby('date').head(1).index
+                    df_current.loc[first_true_idx_9, 'strategy_9'] = True
+
+                # Clean up temporary columns
+                #temp_cols_to_drop = ['date', 's_8', 's_9', 's_10', 's_11', 's_12']
                 temp_cols_to_drop = ['date']
                 df_current.drop(temp_cols_to_drop, axis=1, inplace=True, errors='ignore')
             
@@ -1664,8 +1803,7 @@ class LiveDataManager:
         except Exception as e:
             colored_log(self.logger, 'error', f"Error calculating indicators for {symbol} {timeframe}: {e}", success=False)
             return df_current  # Return original dataframe on error
-    
-    
+
     def _calculate_zlema_macd(self, df):
         """Calculate Zero-Lag EMA MACD indicators"""
         try:
@@ -1728,18 +1866,505 @@ class LiveDataManager:
             else:
                 colored_log(self.logger, 'warning', f"No data found for {symbol} {interval} between {start_day} and {end_day}", success=False)
         return df
+
+    def relative_momentum_index(self, close, window=50):
+        """RMI is a more responsive alternative to ADX."""
+        delta = close.diff(1)
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window).mean()
+        avg_loss = loss.rolling(window).mean()
+        rmi = 100 * (avg_gain / (avg_gain + avg_loss))
+        return rmi
+
+    def exclude_first_30min(self, group):
+        """Calculate expanding mean of range excluding first 30 minutes"""
+        try:
+            if group.empty or 'range' not in group.columns:
+                return pd.Series(dtype=float)
+                
+            mask = ~(
+                (group['time'].dt.time >= time(3, 45)) & 
+                (group['time'].dt.time < time(4, 15)) # Time in UTC - hence 3.45 to 4.15
+            )
+            filtered_group = group[mask]
+            if filtered_group.empty:
+                return pd.Series(dtype=float, index=group.index)
+                
+            result = filtered_group['range'].expanding().mean()
+            # Ensure we return a Series aligned with the original group
+            return result.reindex(group.index).ffill()
+        except Exception as e:
+            # Return a Series of NaNs if there's an error
+            return pd.Series(float('nan'), index=group.index)
     
     def zero_lag_ema(self, series, period):
         ema1 = series.ewm(span=period, adjust=False).mean()
         ema2 = ema1.ewm(span=period, adjust=False).mean()
-        return ema1 + (ema1 - ema2)    
+        return ema1 + (ema1 - ema2)
+
+    def hull_moving_average(self, close, window=50):
+        """HMA reduces lag significantly vs EMA."""
+        wma_half = talib.WMA(close, timeperiod=window//2)
+        wma_full = talib.WMA(close, timeperiod=window)
+        hma = talib.WMA(2 * wma_half - wma_full, timeperiod=int(np.sqrt(window)))
+        return hma
+
+    def zero_lag_macd(self, close, fast=12, slow=26, signal=9):
+        """MACD using Zero-Lag EMAs (TEMA)."""
+        ema_fast = talib.TEMA(close, timeperiod=fast)
+        ema_slow = talib.TEMA(close, timeperiod=slow)
+        macd = ema_fast - ema_slow
+        signal_line = talib.TEMA(macd, timeperiod=signal)
+        return macd, signal_line
+
+    def classify_trend(self, row, interval):
+        # Primary Conditions (1H)
+        ema_bullish = row['close'] > row[f'nifty_{interval}_ema_50'] > row[f'nifty_{interval}_ema_200']
+        ema_bearish = row['close'] < row[f'nifty_{interval}_ema_50'] < row[f'nifty_{interval}_ema_200']
+        #hma_bullish = row['close'] > row[f'nifty_{interval}_hma_50'] > row[f'nifty_{interval}_hma_200']
+        #hma_bearish = row['close'] < row[f'nifty_{interval}_hma_50'] < row[f'nifty_{interval}_hma_200']
+        #rmi_strong = row[f'nifty_{interval}_RMI'] > 60  # RMI > 60 = strong trend
+        adx_strong = row[f'nifty_{interval}_adx'] > 20
+        di_bullish = row[f'nifty_{interval}_+DI'] > row[f'nifty_{interval}_-DI']
+        di_bearish = row[f'nifty_{interval}_-DI'] > row[f'nifty_{interval}_+DI']
+        macd_bullish = row[f'nifty_{interval}_MACD'] > row[f'nifty_{interval}_MACD_Signal']
+        macd_bearish = row[f'nifty_{interval}_MACD'] < row[f'nifty_{interval}_MACD_Signal']
+        #volume_ok = row['Volume_Spike']
+        
+        # Trend Logic
+        if ema_bullish and adx_strong and di_bullish and macd_bullish:
+            return 1
+        elif ema_bearish and adx_strong and di_bearish and macd_bearish:
+            return -1
+        else:
+            return 0
+
+    def calculate_all_indicators_once(self, df_all_dict, symbol):
+        """
+        Calculate all indicators once for the entire dataset
+        Returns: Dictionary with pre-calculated dataframes
+        """
+        #self.logger.info(f"Calculating indicators once for entire dataset for {symbol}")
+        
+        # Extract dataframes
+        df_15m = df_all_dict['15m'].copy()
+        df_5m = df_all_dict['5m'].copy()
+        df_1m = df_all_dict['1m'].copy()
+        df_daily = df_all_dict['d'].copy()
+        df_nifty_15m = df_all_dict['nifty_15m'].copy()
+        
+        
+        # === ENSURE TIME COLUMNS ARE DATETIME ===
+        for df in [df_15m, df_5m, df_1m, df_daily, df_nifty_15m]:
+            if not df.empty:
+                df['time'] = pd.to_datetime(df['time'])
+        
+        # === EARLY RETURN IF CRITICAL DATA IS MISSING ===
+        if df_15m.empty or df_5m.empty or df_daily.empty or df_nifty_15m.empty:
+            colored_log(self.logger, 'warning', f"Missing critical data for {symbol} - skipping indicator calculations", success=False)
+            return {
+                '15m': df_15m,
+                '5m': df_5m,
+                '1m': df_1m,
+                'd': df_daily,
+                'nifty_15m': df_nifty_15m
+            }
+       
+        # === DAILY INDICATORS (ATR & Volume) ===
+        atr_period = 14
+        volume_period = 14
+        df_daily['prev_close'] = df_daily['close'].shift(1)
+        df_daily['tr1'] = df_daily['high'] - df_daily['low']
+        df_daily['tr2'] = abs(df_daily['high'] - df_daily['prev_close'])
+        df_daily['tr3'] = abs(df_daily['low'] - df_daily['prev_close'])
+        df_daily['tr'] = df_daily[['tr1', 'tr2', 'tr3']].max(axis=1)
+        df_daily['atr_10'] = df_daily['tr'].ewm(span=10, adjust=False).mean()
+        df_daily['volume_10'] = df_daily['volume'].rolling(window=10).mean()
+        df_daily['close_10'] = df_daily['close'].rolling(window=10).mean()
+        df_daily['close_14'] = df_daily['close'].rolling(window=14).mean()
+        df_daily['rsi_14'] = talib.RSI(df_daily['close'], timeperiod=14)
+        df_daily['adx_14'] = talib.ADX(df_daily['high'], df_daily['low'], df_daily['close'], timeperiod=14)
+        df_daily.drop(['prev_close', 'tr1', 'tr2', 'tr3', 'tr'], axis=1, inplace=True)
+        
+        # Add date columns for merging
+        df_15m['date'] = pd.to_datetime(df_15m['time'].dt.date)
+        df_5m['date'] = pd.to_datetime(df_5m['time'].dt.date)
+        df_daily['date'] = pd.to_datetime(df_daily['time'].dt.date)
+        df_nifty_15m['date'] = pd.to_datetime(df_nifty_15m['time'].dt.date)
+        
+        
+        # Merge ATR from daily data
+        df_15m = df_15m[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'close_14']], on='date', how='left')
+        df_5m = df_5m[['time', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']].merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'close_14']], on='date', how='left')
+        
+        # === NIFTY 15m INDICATORS (Nifty 50EMA) ===
+        df_nifty_15m = df_nifty_15m.merge(df_daily[['date', 'atr_10', 'volume_10', 'close_10', 'close_14', 'rsi_14', 'adx_14']], on='date', how='left')    
+
+        df_nifty_15m['nifty_15m_ema_50'] = df_nifty_15m['close'].ewm(span=50, adjust=False).mean()
+        df_nifty_15m['nifty_15m_ema_200'] = df_nifty_15m['close'].ewm(span=200, adjust=False).mean()
+        df_nifty_15m['nifty_15m_adx'] = talib.ADX(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+        df_nifty_15m['nifty_15m_+DI'] = talib.PLUS_DI(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+        df_nifty_15m['nifty_15m_-DI'] = talib.MINUS_DI(df_nifty_15m['high'], df_nifty_15m['low'], df_nifty_15m['close'], timeperiod=125)
+        df_nifty_15m['nifty_15m_MACD'], df_nifty_15m['nifty_15m_MACD_Signal'], _ = talib.MACD(df_nifty_15m['close'], fastperiod=20, slowperiod=50, signalperiod=10)
+        df_nifty_15m['nifty_15m_Volume_MA20'] = talib.MA(df_nifty_15m['volume'], timeperiod=20)
+        df_nifty_15m['nifty_15m_Volume_Spike'] = df_nifty_15m['volume'] > 1.5 * df_nifty_15m['nifty_15m_Volume_MA20']
+        df_nifty_15m['nifty_15m_RSI'] = talib.RSI(df_nifty_15m['close'], timeperiod=14)
+        df_nifty_15m['nifty_15m_volume_sma_20'] = df_nifty_15m['volume'].rolling(window=20).mean()
+        df_nifty_15m['nifty_15m_RVOL'] = df_nifty_15m['volume'] / df_nifty_15m['nifty_15m_volume_sma_20']
+        
+        df_nifty_15m['nifty_15m_RMI'] = self.relative_momentum_index(df_nifty_15m['close'])
+        
+        df_nifty_15m['nifty_trend_15m'] = df_nifty_15m.apply(self.classify_trend, args=('15m',), axis=1)
+
+        # Merge trend into the 5min and 15min df
+        # Keep only the first record each day
+        df_nifty_15m = df_nifty_15m.groupby('date').last().reset_index()
+        df_nifty_15m['nifty_trend_15m'] = df_nifty_15m['nifty_trend_15m'].shift(1)
+        df_15m = df_15m.merge(df_nifty_15m[['date', 'nifty_trend_15m']], on='date', how='left')
+        df_5m = df_5m.merge(df_nifty_15m[['date', 'nifty_trend_15m']], on='date', how='left')
+        
+        # === 5MIN INDICATORS (EMAs) ===
+        df_5m['ema_50'] = df_5m['close'].ewm(span=50, adjust=False).mean()
+        df_5m['ema_100'] = df_5m['close'].ewm(span=100, adjust=False).mean()
+        df_5m['ema_200'] = df_5m['close'].ewm(span=200, adjust=False).mean()
+        
+        # === RANGE CALCULATIONS - 15m ===
+        df_15m['range'] = df_15m['high'] - df_15m['low']
+        df_15m['date_only'] = df_15m['time'].dt.date
+        df_15m['avg_range_all'] = df_15m.groupby('date_only')['range'].expanding().mean().reset_index(level=0, drop=True)
+        
+        # Fix for "Cannot set a DataFrame with multiple columns" error
+        try:
+            avg_ex_first_30min_15m = df_15m.groupby('date_only').apply(self.exclude_first_30min)
+            # Ensure we get a Series, not DataFrame
+            if isinstance(avg_ex_first_30min_15m, pd.DataFrame):
+                avg_ex_first_30min_15m = avg_ex_first_30min_15m.iloc[:, 0]  # Take first column
+            avg_ex_first_30min_15m = avg_ex_first_30min_15m.reset_index(level=0, drop=True)
+            df_15m['avg_range_ex_first_30min'] = avg_ex_first_30min_15m.reindex(df_15m.index).ffill()
+        except Exception as e:
+            colored_log(self.logger, 'warning', f"Error calculating avg_range_ex_first_30min for 15m: {e}, using avg_range_all instead", success=False)
+            df_15m['avg_range_ex_first_30min'] = df_15m['avg_range_all']
+        # Create a mask for first 30 minutes (3:45 to 4:15 UTC)
+        first_30min_mask_15m = (
+            (df_15m['time'].dt.time >= time(3, 45)) & 
+            (df_15m['time'].dt.time < time(4, 15))
+        )
+        
+        # For first 30 minutes, use rolling average of today's ranges
+        # For after 30 minutes, use avg_range_ex_first_30min
+        avg_range_for_comparison_15m = df_15m['avg_range_ex_first_30min'].copy()
+        avg_range_for_comparison_15m.loc[first_30min_mask_15m] = df_15m.loc[first_30min_mask_15m, 'avg_range_all']
+        
+        df_15m['is_range_bullish'] = (
+            (df_15m['range'] > 0.7 * avg_range_for_comparison_15m) & 
+            (df_15m['close'] > df_15m['open']) & 
+            (df_15m['close'] > (((df_15m['high'] - df_15m['open']) * 0.5) + df_15m['open']))
+        )
+        df_15m['is_range_bearish'] = (
+            (df_15m['range'] > 0.7 * avg_range_for_comparison_15m) & 
+            (df_15m['close'] < df_15m['open']) & 
+            (df_15m['close'] < (((df_15m['open'] - df_15m['low']) * 0.5) + df_15m['low']))
+        )
+        df_15m.drop('date_only', axis=1, inplace=True)
+        
+        # === RANGE CALCULATIONS - 5m ===
+        df_5m['range'] = df_5m['high'] - df_5m['low']
+        df_5m['date_only'] = df_5m['time'].dt.date
+        df_5m['avg_range_all'] = df_5m.groupby('date_only')['range'].expanding().mean().reset_index(level=0, drop=True)
+        
+        # Fix for "Cannot set a DataFrame with multiple columns" error
+        try:
+            avg_ex_first_30min_5m = df_5m.groupby('date_only').apply(self.exclude_first_30min)
+            # Ensure we get a Series, not DataFrame
+            if isinstance(avg_ex_first_30min_5m, pd.DataFrame):
+                avg_ex_first_30min_5m = avg_ex_first_30min_5m.iloc[:, 0]  # Take first column
+            avg_ex_first_30min_5m = avg_ex_first_30min_5m.reset_index(level=0, drop=True)
+            df_5m['avg_range_ex_first_30min'] = avg_ex_first_30min_5m.reindex(df_5m.index).ffill()
+        except Exception as e:
+            colored_log(self.logger, 'warning', f"Error calculating avg_range_ex_first_30min for 5m: {e}, using avg_range_all instead", success=False)
+            df_5m['avg_range_ex_first_30min'] = df_5m['avg_range_all']
+        # Create a mask for first 30 minutes (3:45 to 4:15 UTC)
+        first_30min_mask_5m = (
+            (df_5m['time'].dt.time >= time(3, 45)) & 
+            (df_5m['time'].dt.time < time(4, 15))
+        )
+        
+        # For first 30 minutes, use rolling average of today's ranges
+        # For after 30 minutes, use avg_range_ex_first_30min
+        avg_range_for_comparison_5m = df_5m['avg_range_ex_first_30min'].copy()
+        avg_range_for_comparison_5m.loc[first_30min_mask_5m] = df_5m.loc[first_30min_mask_5m, 'avg_range_all']
+        
+        df_5m['is_range_bullish'] = (
+            (df_5m['range'] > 0.7 * avg_range_for_comparison_5m) & 
+            (df_5m['close'] > df_5m['open']) & 
+            (df_5m['close'] > (((df_5m['high'] - df_5m['open']) * 0.5) + df_5m['open']))
+        )
+        df_5m['is_range_bearish'] = (
+            (df_5m['range'] > 0.7 * avg_range_for_comparison_5m) & 
+            (df_5m['close'] < df_5m['open']) & 
+            (df_5m['close'] < (((df_5m['open'] - df_5m['low']) * 0.5) + df_5m['low']))
+        )
+        df_5m.drop('date_only', axis=1, inplace=True)
+
+        # === ZERO LAG MACD (15m only) ===
+        fast_period, slow_period, signal_period = 12, 26, 9
+        df_15m['fast_zlema'] = self.zero_lag_ema(df_15m['close'], fast_period)
+        df_15m['slow_zlema'] = self.zero_lag_ema(df_15m['close'], slow_period)
+        df_15m['zl_macd'] = df_15m['fast_zlema'] - df_15m['slow_zlema']
+        df_15m['zl_signal'] = df_15m['zl_macd'].ewm(span=signal_period, adjust=False).mean()
+        df_15m['zl_hist'] = df_15m['zl_macd'] - df_15m['zl_signal']
+        
+        # Generate MACD Signals
+        df_15m['zl_macd_signal'] = 0
+        df_15m.loc[(df_15m['zl_macd'] > df_15m['zl_signal']) & 
+                (df_15m['zl_macd'].shift(1) <= df_15m['zl_signal'].shift(1)), 'zl_macd_signal'] = 1
+        df_15m.loc[(df_15m['zl_macd'] < df_15m['zl_signal']) & 
+                (df_15m['zl_macd'].shift(1) >= df_15m['zl_signal'].shift(1)), 'zl_macd_signal'] = -1
+        df_15m.drop(['fast_zlema', 'slow_zlema', 'zl_macd', 'zl_signal', 'zl_hist'], axis=1, inplace=True)
+        
+        # === SINGLE PRINT CALCULATIONS - 15m ===
+        df_15m['is_first_bullish_confirmed'] = False
+        df_15m['is_first_bearish_confirmed'] = False
+        df_15m['candle_count'] = df_15m.groupby(df_15m['date']).cumcount() + 1
+        df_15m['cum_high_prev'] = df_15m.groupby('date')['high'].expanding().max().shift(1).reset_index(level=0, drop=True)
+        df_15m['cum_low_prev'] = df_15m.groupby('date')['low'].expanding().min().shift(1).reset_index(level=0, drop=True)
+        df_15m['cum_high'] = df_15m.groupby('date')['high'].expanding().max().reset_index(level=0, drop=True)
+        df_15m['cum_low'] = df_15m.groupby('date')['low'].expanding().min().reset_index(level=0, drop=True)
+        df_15m['sp_confirmed_bullish'] = (
+            (df_15m['close'] > df_15m['cum_high_prev']) & 
+            (df_15m['close'] > df_15m['open']) & 
+            (df_15m['candle_count'] >= 2)
+        )
+        df_15m['sp_confirmed_bearish'] = (
+            (df_15m['close'] < df_15m['cum_low_prev']) & 
+            (df_15m['close'] < df_15m['open']) & 
+            (df_15m['candle_count'] >= 2)
+        )
+        
+        # Mark first confirmations
+        bullish_conf_15m = df_15m[df_15m['sp_confirmed_bullish']]
+        bearish_conf_15m = df_15m[df_15m['sp_confirmed_bearish']]
+        first_bullish_idx_15m = bullish_conf_15m.groupby('date').head(1).index
+        first_bearish_idx_15m = bearish_conf_15m.groupby('date').head(1).index
+        df_15m.loc[first_bullish_idx_15m, 'is_first_bullish_confirmed'] = True
+        df_15m.loc[first_bearish_idx_15m, 'is_first_bearish_confirmed'] = True
+        
+        # SP levels for 15m
+        sp_levels_bullish_15m = df_15m[df_15m['is_first_bullish_confirmed']][['date', 'close', 'cum_high_prev']]
+        sp_levels_bearish_15m = df_15m[df_15m['is_first_bearish_confirmed']][['date', 'close', 'cum_low_prev']]
+        sp_levels_bullish_15m['sp_high_bullish'] = sp_levels_bullish_15m['close']
+        sp_levels_bullish_15m['sp_low_bullish'] = sp_levels_bullish_15m['cum_high_prev']
+        sp_levels_bearish_15m['sp_high_bearish'] = sp_levels_bearish_15m['cum_low_prev']
+        sp_levels_bearish_15m['sp_low_bearish'] = sp_levels_bearish_15m['close']
+        sp_levels_bullish_15m.drop(['close', 'cum_high_prev'], axis=1, inplace=True)
+        sp_levels_bearish_15m.drop(['close', 'cum_low_prev'], axis=1, inplace=True)
+        
+        # Merge back for 15m
+        df_15m = df_15m.merge(sp_levels_bullish_15m, on='date', how='left')
+        df_15m = df_15m.merge(sp_levels_bearish_15m, on='date', how='left')
+        
+        # Forward fill SP levels for 15m
+        df_15m['sp_high_bullish'] = df_15m.groupby('date')['sp_high_bullish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+        df_15m['sp_low_bullish'] = df_15m.groupby('date')['sp_low_bullish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+        df_15m['sp_high_bearish'] = df_15m.groupby('date')['sp_high_bearish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+        df_15m['sp_low_bearish'] = df_15m.groupby('date')['sp_low_bearish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+        
+        # Set pre-confirmation values to NaN for 15m
+        df_15m.loc[~df_15m['sp_confirmed_bullish'].cummax(), ['sp_high_bullish', 'sp_low_bullish']] = None
+        df_15m.loc[~df_15m['sp_confirmed_bearish'].cummax(), ['sp_high_bearish', 'sp_low_bearish']] = None
+        
+        # Calculate SP range percentages for 15m
+        df_15m['sp_bullish_range_pct'] = (df_15m['sp_high_bullish'] - df_15m['sp_low_bullish']) / df_15m['sp_low_bullish'] * 100
+        df_15m['sp_bearish_range_pct'] = (df_15m['sp_high_bearish'] - df_15m['sp_low_bearish']) / df_15m['sp_low_bearish'] * 100
+        df_15m['cum_sp_bullish'] = df_15m.groupby('date')['sp_confirmed_bullish'].cumsum()
+        df_15m['cum_sp_bearish'] = df_15m.groupby('date')['sp_confirmed_bearish'].cumsum()
+        
+        # === SINGLE PRINT CALCULATIONS - 5m ===
+        df_5m['is_first_bullish_confirmed'] = False
+        df_5m['is_first_bearish_confirmed'] = False
+        df_5m['candle_count'] = df_5m.groupby(df_5m['date']).cumcount() + 1
+        df_5m['cum_high_prev'] = df_5m.groupby('date')['high'].expanding().max().shift(1).reset_index(level=0, drop=True)
+        df_5m['cum_low_prev'] = df_5m.groupby('date')['low'].expanding().min().shift(1).reset_index(level=0, drop=True)
+        df_5m['cum_high'] = df_5m.groupby('date')['high'].expanding().max().reset_index(level=0, drop=True)
+        df_5m['cum_low'] = df_5m.groupby('date')['low'].expanding().min().reset_index(level=0, drop=True)
+        df_5m['sp_confirmed_bullish'] = (
+            (df_5m['close'] > df_5m['cum_high_prev']) & 
+            (df_5m['close'] > df_5m['open']) & 
+            (df_5m['candle_count'] >= 2)
+        )
+        df_5m['sp_confirmed_bearish'] = (
+            (df_5m['close'] < df_5m['cum_low_prev']) & 
+            (df_5m['close'] < df_5m['open']) & 
+            (df_5m['candle_count'] >= 2)
+        )
+        
+        # Mark first confirmations for 5m
+        bullish_conf_5m = df_5m[df_5m['sp_confirmed_bullish']]
+        bearish_conf_5m = df_5m[df_5m['sp_confirmed_bearish']]
+        first_bullish_idx_5m = bullish_conf_5m.groupby('date').head(1).index
+        first_bearish_idx_5m = bearish_conf_5m.groupby('date').head(1).index
+        df_5m.loc[first_bullish_idx_5m, 'is_first_bullish_confirmed'] = True
+        df_5m.loc[first_bearish_idx_5m, 'is_first_bearish_confirmed'] = True
+        
+        # SP levels for 5m
+        sp_levels_bullish_5m = df_5m[df_5m['is_first_bullish_confirmed']][['date', 'close', 'cum_high_prev']]
+        sp_levels_bearish_5m = df_5m[df_5m['is_first_bearish_confirmed']][['date', 'close', 'cum_low_prev']]
+        sp_levels_bullish_5m['sp_high_bullish'] = sp_levels_bullish_5m['close']
+        sp_levels_bullish_5m['sp_low_bullish'] = sp_levels_bullish_5m['cum_high_prev']
+        sp_levels_bearish_5m['sp_high_bearish'] = sp_levels_bearish_5m['cum_low_prev']
+        sp_levels_bearish_5m['sp_low_bearish'] = sp_levels_bearish_5m['close']
+        sp_levels_bullish_5m.drop(['close', 'cum_high_prev'], axis=1, inplace=True)
+        sp_levels_bearish_5m.drop(['close', 'cum_low_prev'], axis=1, inplace=True)
+        
+        # Merge back for 5m
+        df_5m = df_5m.merge(sp_levels_bullish_5m, on='date', how='left')
+        df_5m = df_5m.merge(sp_levels_bearish_5m, on='date', how='left')
+        
+        # Forward fill SP levels for 5m
+        df_5m['sp_high_bullish'] = df_5m.groupby('date')['sp_high_bullish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+        df_5m['sp_low_bullish'] = df_5m.groupby('date')['sp_low_bullish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+        df_5m['sp_high_bearish'] = df_5m.groupby('date')['sp_high_bearish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+        df_5m['sp_low_bearish'] = df_5m.groupby('date')['sp_low_bearish'].transform(lambda x: x.ffill() if x.notna().any() else x)
+        
+        # Set pre-confirmation values to NaN for 5m
+        df_5m.loc[~df_5m['sp_confirmed_bullish'].cummax(), ['sp_high_bullish', 'sp_low_bullish']] = None
+        df_5m.loc[~df_5m['sp_confirmed_bearish'].cummax(), ['sp_high_bearish', 'sp_low_bearish']] = None
+        
+        # Calculate SP range percentages for 5m
+        df_5m['sp_bullish_range_pct'] = (df_5m['sp_high_bullish'] - df_5m['sp_low_bullish']) / df_5m['sp_low_bullish'] * 100
+        df_5m['sp_bearish_range_pct'] = (df_5m['sp_high_bearish'] - df_5m['sp_low_bearish']) / df_5m['sp_low_bearish'] * 100
+        df_5m['cum_sp_bullish'] = df_5m.groupby('date')['sp_confirmed_bullish'].cumsum()
+        df_5m['cum_sp_bearish'] = df_5m.groupby('date')['sp_confirmed_bearish'].cumsum()
+        
+        # === VOLUME & RANGE CALCULATIONS - 15m ===
+        df_15m['cum_intraday_volume'] = df_15m.groupby('date')['volume'].cumsum()
+        df_15m['curtop'] = df_15m.groupby('date')['high'].cummax()
+        df_15m['curbot'] = df_15m.groupby('date')['low'].cummin()
+        df_15m['predicted_today_high'] = df_15m['curbot'] + df_15m['atr_10']
+        df_15m['predicted_today_low'] = df_15m['curtop'] - df_15m['atr_10']
+        df_15m['today_range'] = df_15m['curtop'] - df_15m['curbot']
+        df_15m['today_range_pct_10'] = df_15m['today_range'] / df_15m['atr_10']        
+        df_15m['volume_range_pct_10'] = (df_15m['cum_intraday_volume'] / df_15m['volume_10']) / df_15m['today_range_pct_10']
+        
+        # === VOLUME & RANGE CALCULATIONS - 5m ===
+        df_5m['cum_intraday_volume'] = df_5m.groupby('date')['volume'].cumsum()
+        df_5m['curtop'] = df_5m.groupby('date')['high'].cummax()
+        df_5m['curbot'] = df_5m.groupby('date')['low'].cummin()
+        df_5m['predicted_today_high'] = df_5m['curbot'] + df_5m['atr_10']
+        df_5m['predicted_today_low'] = df_5m['curtop'] - df_5m['atr_10']
+        df_5m['today_range'] = df_5m['curtop'] - df_5m['curbot']
+        df_5m['today_range_pct_10'] = df_5m['today_range'] / df_5m['atr_10']
+        df_5m['volume_range_pct_10'] = (df_5m['cum_intraday_volume'] / df_5m['volume_10']) / df_5m['today_range_pct_10']
+        
+        # === STRATEGY DEFINITIONS ===
+        # Strategy 8 & 12 (15m)
+        df_15m['s_8'] = (
+            (df_15m['time'].dt.time >= time(4, 0)) & 
+            (df_15m['time'].dt.time < time(8, 15)) & 
+            (df_15m['cum_sp_bullish'] >= 1) & 
+            (df_15m['sp_bullish_range_pct'] > 0.8) & 
+            (df_15m['sp_bullish_range_pct'] < 1.3) & 
+            (df_15m['zl_macd_signal'] == -1) & 
+            (df_15m['volume_range_pct_10'] > 1) &
+            (df_15m['atr_10'] / df_15m['close_10'] < 0.04) &
+            (df_15m['nifty_trend_15m'] >= 0)
+        )
+        df_15m['strategy_8'] = False
+        first_true_idx_8 = df_15m[df_15m['s_8']].groupby('date').head(1).index
+        df_15m.loc[first_true_idx_8, 'strategy_8'] = True
+        
+        df_15m['s_12'] = (
+            (df_15m['time'].dt.time >= time(4, 0)) & 
+            (df_15m['time'].dt.time < time(8, 15)) & 
+            (df_15m['cum_sp_bearish'] >= 1) & 
+            (df_15m['sp_bearish_range_pct'] > 1) & 
+            (df_15m['zl_macd_signal'] == 1) &
+            (df_15m['volume_range_pct_10'] > 0) &
+            (df_15m['volume_range_pct_10'] < 0.4) &
+            (df_15m['atr_10'] / df_15m['close_10'] < 0.04) &
+            (df_15m['nifty_trend_15m'] <= 0)
+        )
+        df_15m['strategy_12'] = False
+        first_true_idx_12 = df_15m[df_15m['s_12']].groupby('date').head(1).index
+        df_15m.loc[first_true_idx_12, 'strategy_12'] = True
+        
+        
+        # Strategy 10 & 11 (5m)
+        df_5m['s_10'] = (
+            (df_5m['time'].dt.time >= time(3, 50)) & 
+            (df_5m['time'].dt.time < time(8, 15)) & 
+            (df_5m['cum_sp_bearish'] >= 1) & 
+            (df_5m['sp_bearish_range_pct'] > 0.6) & 
+            (df_5m['close'] < df_5m['ema_50']) & 
+            (df_5m['close'] < df_5m['ema_100']) & 
+            (df_5m['close'] < df_5m['ema_200']) & 
+            (df_5m['is_range_bearish']) & 
+            (df_5m['volume_range_pct_10'] > 0.3) & 
+            (df_5m['volume_range_pct_10'] < 0.7) & 
+            (df_5m['atr_10'] / df_5m['close_10'] > 0.04) &            
+            (df_5m['nifty_trend_15m'] != 1)
+        )
+        df_5m['strategy_10'] = False
+        first_true_idx_10 = df_5m[df_5m['s_10']].groupby('date').head(1).index
+        df_5m.loc[first_true_idx_10, 'strategy_10'] = True
+        
+        df_5m['s_11'] = (
+            (df_5m['time'].dt.time >= time(3, 50)) & 
+            (df_5m['time'].dt.time < time(8, 15)) & 
+            (df_5m['cum_sp_bullish'] >= 1) & 
+            (df_5m['sp_bullish_range_pct'] > 0.8) & 
+            (df_5m['close'] > df_5m['ema_50']) & 
+            (df_5m['close'] > df_5m['ema_100']) & 
+            (df_5m['close'] > df_5m['ema_200']) & 
+            (df_5m['is_range_bullish']) & 
+            (df_5m['volume_range_pct_10'] > 0) & 
+            (df_5m['volume_range_pct_10'] < 0.3) &
+            (df_5m['atr_10'] / df_5m['close_10'] > 0.04) &
+            (df_5m['nifty_trend_15m'] != -1)
+        )
+        df_5m['strategy_11'] = False
+        first_true_idx_11 = df_5m[df_5m['s_11']].groupby('date').head(1).index
+        df_5m.loc[first_true_idx_11, 'strategy_11'] = True
+        
+        df_5m['s_9'] = (
+            (df_5m['time'].dt.time >= time(3, 50)) & 
+            (df_5m['time'].dt.time < time(8, 15)) & 
+            (df_5m['cum_sp_bullish'] >= 1) & 
+            (df_5m['sp_bullish_range_pct'] > 0.8) & 
+            (df_5m['close'] > df_5m['ema_50']) & 
+            (df_5m['close'] > df_5m['ema_100']) & 
+            (df_5m['close'] > df_5m['ema_200']) & 
+            (df_5m['is_range_bullish']) & 
+            (df_5m['volume_range_pct_10'] > 0.3) & 
+            (df_5m['volume_range_pct_10'] < 0.6) &
+            (df_5m['atr_10'] / df_5m['close_10'] < 0.04) &
+            (df_5m['nifty_trend_15m'] != 1)
+        )
+        df_5m['strategy_9'] = False
+        first_true_idx_9 = df_5m[df_5m['s_9']].groupby('date').head(1).index
+        df_5m.loc[first_true_idx_9, 'strategy_9'] = True
+        
+        # Clean up date columns
+        df_15m.drop('date', axis=1, inplace=True)
+        df_5m.drop('date', axis=1, inplace=True)
+        
+             
+        return {
+            '15m': df_15m,
+            '5m': df_5m,
+            '1m': df_1m,
+            'd': df_daily,
+            'nifty_15m': df_nifty_15m
+        }
 
     def chunk_dates(self, start_date, end_date, chunk_size_days):
         current = start_date
         while current <= end_date:
             next_chunk = min(current + timedelta(days=chunk_size_days - 1), end_date)
             yield current, next_chunk
-            current = next_chunk + timedelta(days=1)            
+            current = next_chunk + timedelta(days=1)
+            
     
     def _update_indicators_in_db(self, df, symbol, timeframe):
         """Update indicators in database"""
@@ -1750,7 +2375,9 @@ class LiveDataManager:
             cursor = self.db_conn.cursor()            
             
             if timeframe == '15m':
-                indicator_columns = ['daily_return', 'daily_atr_14', 'daily_rsi_14', 'daily_macd', 'daily_macd_signal', 'daily_ema_10', 'daily_ema_20', 'daily_ema_30', 'daily_volatility_10', 'daily_volatility_20', 'daily_volatility_30', 'daily_volume_10', 'daily_volume_20', 'daily_volume_30', 'log_return', 'hl_range', 'body_ratio', 'change_since_day_open', 'change_since_prev_day_close', 'change_since_last_close', 'change_since_last_close_2', 'change_since_last_close_3', 'volatility_50', 'volatility_100', 'volatility_200', 'ema_50', 'ema_100', 'ema_200', 'macd', 'macd_signal', 'rsi_14', 'bollinger_bands_upper', 'bollinger_bands_middle', 'bollinger_bands_lower', 'adx', 'di_plus', 'di_minus', 'zl_macd_signal', 'is_first_bullish_confirmed', 'is_first_bearish_confirmed', 'sp_bullish_range_pct', 'sp_bearish_range_pct', 'cum_sp_bullish', 'cum_sp_bearish', 'hour', 'hour_sin', 'hour_cos', 'strategy_8', 's_8']
+                indicator_columns = ['atr_10', 'volume_10', 'close_10', 'cum_sp_bullish', 'sp_bullish_range_pct', 'cum_sp_bearish', 'sp_bearish_range_pct', 'zl_macd_signal', 'volume_range_pct_10', 'cum_intraday_volume', 'today_range_pct_10', 'nifty_trend_15m', 'strategy_8', 'strategy_9', 'strategy_10', 'strategy_11', 'strategy_12', 's_8', 's_9', 's_10', 's_11', 's_12']
+            else:
+                indicator_columns = ['atr_10', 'volume_10', 'close_10', 'cum_sp_bullish', 'sp_bullish_range_pct', 'cum_sp_bearish', 'sp_bearish_range_pct', 'ema_50', 'ema_100', 'ema_200', 'is_range_bullish', 'is_range_bearish', 'volume_range_pct_10', 'cum_intraday_volume', 'today_range_pct_10', 'nifty_trend_15m', 'strategy_8', 'strategy_9', 'strategy_10', 'strategy_11', 'strategy_12', 's_8', 's_9', 's_10', 's_11', 's_12']
             
             for _, row in df.iterrows():
                 # Build update query for available indicators
@@ -1761,10 +2388,14 @@ class LiveDataManager:
                     if col in row and pd.notna(row[col]):
                         update_parts.append(f"{col} = %s")
                         # Convert boolean strategy values to integers
-                        if col.startswith('zl_macd_signal') or col.startswith('is_first_') or col.startswith('cum_sp_') or col.startswith('day_of_week'):
-                            values.append(int(row[col]))                        
-                        else:
+                        if col.startswith('nifty_trend_15m') or col.startswith('volume_10') or col.startswith('cum_sp_bullish') or col.startswith('cum_sp_bearish') or col.startswith('cum_intraday_volume') or col.startswith('zl_macd_signal') or col.startswith('nifty_trend_15m'):
+                            values.append(int(row[col]))
+                        elif col.startswith('atr_') or col.startswith('close_') or col.startswith('volume_range_pct_10') or col.startswith('curtop') or col.startswith('ema_') or col.startswith('sp_bullish_range_pct') or col.startswith('sp_bearish_range_pct') or col.startswith('volume_range_pct_10') or col.startswith('today_range_pct_10'):
                             values.append(float(row[col]))
+                        elif col.startswith('strategy_') or col.startswith('s_') or col.startswith('is_range_bullish') or col.startswith('is_range_bearish'):
+                            values.append(bool(row[col]))
+                        else:
+                            values.append(row[col])
                 
                 if update_parts:
                     # Add symbol and time at the end of values list
@@ -1788,7 +2419,7 @@ class LiveDataManager:
     def process_symbol_interval(self, symbol, interval, client, start_date, end_date, mode):
         """Process a single symbol-interval pair"""
         try:
-            if interval == "1m":
+            if interval == "5m" or interval == "1m":
                 # Chunk the dates into smaller ranges to avoid timeout
                 s_d = datetime.strptime(start_date, "%Y-%m-%d").date()
                 e_d = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -1941,7 +2572,7 @@ class LiveDataManager:
         Args:
             df (pd.DataFrame): DataFrame containing historical data
             symbol (str): Stock symbol (e.g., 'RELIANCE')
-            interval (str): Time interval ('1m', '15m', '1d')
+            interval (str): Time interval ('1m', '5m', '15m', '1d')
         """
         try:
             # Ensure we have a pandas DataFrame
@@ -2136,6 +2767,7 @@ class LiveDataManager:
                 if not hasattr(self, '_last_fetch_times'):
                     self._last_fetch_times = {
                         '1m': None,
+                        '5m': None,
                         '15m': None
                     }
                 
@@ -2174,12 +2806,19 @@ class LiveDataManager:
                         colored_log(self.logger, 'debug', "No active positions - skipping 1m data fetch", success=True)
 
                 # Prepare data fetch tasks for parallel execution
+                fetch_5m = should_fetch('5m', 5)
                 fetch_15m = should_fetch('15m', 15)
                 
                 # Run 5m and 15m data fetching in parallel
-                if fetch_15m:
+                if fetch_5m or fetch_15m:
                     date_str = current_date.strftime('%Y-%m-%d')
                     timeframe_tasks = []
+                    
+                    if fetch_5m:
+                        start_time_5m = (current_time - timedelta(minutes=6)).time().strftime('%H:%M:%S') # 6 minutes buffer
+                        end_time_5m = current_time.time().strftime('%H:%M:%S')
+                        timeframe_tasks.append(('5m', start_time_5m, end_time_5m))
+                        colored_log(self.logger, 'info', f"Queuing 5m data fetch for {len(self.symbols)} symbols. Current time: {current_time.time()}", success=True)
                     
                     if fetch_15m:
                         start_time_15m = (current_time - timedelta(minutes=16)).time().strftime('%H:%M:%S') # 16 minutes buffer
@@ -2207,7 +2846,7 @@ class LiveDataManager:
                             return f"[FAIL] {interval} fetch failed: {e}"
                     
                     # Use ThreadPoolExecutor to run timeframe fetches in parallel
-                    with ThreadPoolExecutor(max_workers=1) as executor:  # Max 1 worker for 15m
+                    with ThreadPoolExecutor(max_workers=2) as executor:  # Max 2 workers for 5m and 15m
                         futures = [executor.submit(fetch_timeframe_data, task) for task in timeframe_tasks]
                         
                         # Wait for all timeframe fetches to complete
@@ -2234,7 +2873,7 @@ class LiveDataManager:
                 self.on_new_candle(symbol, interval, current_candle_time)
                 
                 # Process entry signals only for 5m and 15m timeframes (strategy timeframes)
-                if interval in ['15m'] and self.process_entry:
+                if interval in ['5m', '15m'] and self.process_entry:
                     try:
                         current_time = datetime.now(IST)
                         # Call back to LiveTradingEngine to process entry signals
@@ -2268,14 +2907,268 @@ class LiveDataManager:
         
         colored_log(self.logger, 'info', 
                   f"Parallel {interval} fetch completed: {successful_fetches}/{len(symbols)} symbols in {parallel_time:.2f}s", 
-                  success=True)    
-    
+                  success=True)
+       
+    def _process_messages_non_blocking_(self):
+        """Process messages non-blocking way using TimescaleDB's consumer"""
+        try:
+            
+            # Poll for messages with a short timeout
+            raw_msg = self.consumer.poll(100.0)  # 100ms timeout
+            
+            if raw_msg is None:
+                return  # No messages available
+
+            #self.logger.info(f"Raw message: {raw_msg}")
+            
+            # Process received messages
+            for topic_partition, messages in raw_msg.items():    
+                for message in messages:
+                    try:
+                        # Extract key and value
+                        key = message.key.decode('utf-8')  # 'NSE_RELIANCE_LTP', 'NSE_INDEX_NIFTY_LTP'
+                        value = json.loads(message.value.decode('utf-8'))
+
+                        #self.logger.info(f"Processing {key}: {value['symbol']}@{value['close']}")
+
+                        # Process the message using TimescaleDB's method
+                        self.process_single_message(key, value)
+
+                    except Exception as e:
+                        colored_log(self.logger, 'error', f"Error processing message: {e}", success=False)
+                        
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error in non-blocking message processing: {e}", success=False)
+
+    def process_single_message(self, key, value):
+        """Process extracted tick data"""
+        try:
+            # Extract components from key
+            if key.startswith('NSE_INDEX_NIFTY'):
+                components = key.split('_')
+                exchange = components[0]  # 'NSE'
+                dummy = components[1]    # 'INDEX'
+                symbol = components[2]    # 'NIFTY'
+                data_type = components[3] # 'LTP' or 'QUOTE'
+            else:    
+                components = key.split('_')
+                exchange = components[0]  # 'NSE'
+                symbol = components[1]    # 'RELIANCE'
+                data_type = components[2] # 'LTP' or 'QUOTE'
+
+             # Convert timestamp (handling milliseconds since epoch)
+            timestamp = value['timestamp']
+            if not isinstance(timestamp, (int, float)):
+                raise ValueError(f"Invalid timestamp type: {type(timestamp)}")
+
+            # Convert to proper datetime object
+            # Ensure milliseconds (not seconds or microseconds)
+            if timestamp < 1e12:  # Likely in seconds
+                timestamp *= 1000
+            elif timestamp > 1e13:  # Likely in microseconds
+                timestamp /= 1000
+                
+            dt = datetime.fromtimestamp(timestamp / 1000, tz=pytz.UTC)  
+            
+            # Validate date range
+            if dt.year < 2020 or dt.year > 2030:
+                raise ValueError(f"Implausible date {dt} from timestamp {timestamp}")
+                       
+            # Prepare database record
+            record = {
+                'time': dt,  # Convert ms to seconds
+                'symbol': symbol,
+                'open': float(value['ltp']),
+                'high': float(value['ltp']),
+                'low': float(value['ltp']),
+                'close': float(value['ltp']),
+                'volume': int(value['volume'])
+            }
+
+            #self.logger.info(f"Record---------> {record}")
+            
+            # Store in TimescaleDB
+            self.store_tick(record)  
+
+            # Add to aggregation buffers
+            self.buffer_tick(record)
+
+            # Check for aggregation opportunities
+            self.check_aggregation(record['time'])
+            
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Tick processing failed: {e}", success=False)
+            colored_log(self.logger, 'debug', traceback.format_exc(), success=True)
+
+
+    def store_tick(self, record):
+        """Store raw tick in database"""
+        try:
+            with self.db_conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO ticks (time, symbol, open, high, low, close, volume)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (time, symbol) DO UPDATE SET
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    volume = EXCLUDED.volume
+                    """, (record['time'], record['symbol'], record['open'], record['high'], record['low'], record['close'], record['volume']))
+                self.db_conn.commit()
+        except Exception as e:
+            colored_log(self.logger, 'error', f"Error storing tick: {e}", success=False)
+            self.db_conn.rollback()
+
+    def buffer_tick(self, record):
+        """Add tick to aggregation buffers"""
+        with self.lock:
+            for timeframe in ['1m', '5m', '15m']:
+                minutes = int(timeframe[:-1])
+                symbol = record['symbol']
+                aligned_time = self.floor_to_interval(record['time'], minutes)                
+
+                if symbol not in self.tick_buffer[timeframe]:
+                    self.tick_buffer[timeframe][symbol] = {}
+
+                # Initialize this specific minute bucket
+                if aligned_time not in self.tick_buffer[timeframe][symbol]:
+                    self.tick_buffer[timeframe][symbol][aligned_time] = {
+                        'opens': [],
+                        'highs': [],
+                        'lows': [],
+                        'closes': [],
+                        'volumes': [],
+                        'first_tick': None  # Track the first tick separately
+                    }
+                bucket = self.tick_buffer[timeframe][symbol][aligned_time]
+
+                # For the first tick in this interval, store it separately
+                if bucket['first_tick'] is None:
+                    bucket['first_tick'] = record
+
+                bucket['opens'].append(record['open'])
+                bucket['highs'].append(record['high'])
+                bucket['lows'].append(record['low'])
+                bucket['closes'].append(record['close'])
+                bucket['volumes'].append(record['volume'])
+
+    def check_aggregation(self, current_time):
+        """Check if aggregation should occur for any timeframe"""
+        timeframes = ['1m', '5m', '15m']
+        
+        for timeframe in timeframes:
+            agg_interval = timedelta(minutes=int(timeframe[:-1]))
+            last_agg = self.last_agg_time[timeframe]
+            
+            #self.logger.info(f"{timeframe}: current_time={current_time}, last_agg={last_agg}, interval={agg_interval}")
+
+            if current_time - last_agg >= agg_interval:
+                if self.aggregate_data(timeframe, current_time):
+                    self.last_agg_time[timeframe] = self.floor_to_interval(current_time, int(timeframe[:-1]))
+            
+    def aggregate_data(self, timeframe, agg_time):
+        with self.lock:
+            symbol_buckets = self.tick_buffer[timeframe]
+            if not symbol_buckets:
+                return False
+
+            aggregated = []
+            table_name = f"ohlc_{timeframe}"
+
+            for symbol, buckets in symbol_buckets.items():
+                for bucket_start, data in list(buckets.items()):
+                    if bucket_start >= self.last_agg_time[timeframe] + timedelta(minutes=int(timeframe[:-1])):
+                        # Don't process future buckets
+                        continue
+
+                    if not data['opens']:
+                        continue
+                    
+                    try:
+                        # Get OHLC values
+                        if data['first_tick'] is not None:
+                            open_ = data['first_tick']['open']
+                        else:
+                            open_ = data['opens'][0]
+
+                        #open_ = data['opens'][0]
+                        high = max(data['highs'])
+                        low = min(data['lows'])
+                        close = data['closes'][-1]      
+
+                        # Calculate volume correctly for cumulative data
+                        current_last_volume = data['volumes'][-1]
+                        previous_last_volume = self.last_period_volume[timeframe].get(symbol, current_last_volume)
+                        volume = max(0, current_last_volume - previous_last_volume)
+
+                        # Store the current last volume for next period
+                        self.last_period_volume[timeframe][symbol] = current_last_volume
+
+                        candle = {
+                            'time': bucket_start,
+                            'symbol': symbol,
+                            'open': open_,
+                            'high': high,
+                            'low': low,
+                            'close': close,
+                            'volume': volume
+                        }
+   
+                        aggregated.append(candle)
+
+                        # Notify trading engine of new candle
+                        # self.on_new_candle(symbol, timeframe, candle)
+
+                        # Remove this bucket to avoid re-aggregation
+                        del self.tick_buffer[timeframe][symbol][bucket_start]
+                    
+                    except Exception as e:
+                        self.logger.error(f"Error aggregating {symbol} for {timeframe}: {e}")
+                        continue
+
+            # Aggregate only if volume is greater than 0
+            if aggregated and sum(c['volume'] for c in aggregated) > 0:
+                try:
+                    with self.db_conn.cursor() as cursor:
+                        execute_batch(cursor, f"""
+                            INSERT INTO {table_name} 
+                            (time, symbol, open, high, low, close, volume)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (time, symbol) DO UPDATE SET
+                                open = EXCLUDED.open,
+                                high = EXCLUDED.high,
+                                low = EXCLUDED.low,
+                                close = EXCLUDED.close,
+                                volume = EXCLUDED.volume
+                            """, [(c['time'], c['symbol'], c['open'], c['high'], c['low'], c['close'], c['volume']) for c in aggregated])
+                        self.db_conn.commit()
+                    
+                    # Notify trading engine of new candle
+                    for c in aggregated:
+                        self.on_new_candle(c['symbol'], timeframe, c)
+
+                    colored_log(self.logger, 'info', f"Aggregated {len(aggregated)} symbols to {table_name}", success=True)
+                    return True
+                except Exception as e:
+                    colored_log(self.logger, 'error', f"Error aggregating {timeframe} data: {e}", success=False)
+                    self.db_conn.rollback()
+                    return False
+            elif aggregated and sum(c['volume'] for c in aggregated) == 0:
+                # Show log only if symbol != 'NIFTY'
+                for c in aggregated:
+                    if c['symbol'] != 'NIFTY':
+                        colored_log(self.logger, 'info', f"No volume for {timeframe} data for {c['symbol']}", success=True)
+                return True
+            return False
+
+
     def get_latest_data(self, symbol, timeframe, rows=1):
         """Get latest N rows of data for symbol/timeframe from PostgreSQL"""
         try:
             query = f"""
                 SELECT time, open, high, low, close, volume,
-                       strategy_8
+                       strategy_8, strategy_9, strategy_10, strategy_11, strategy_12
                 FROM ohlc_{timeframe}
                 WHERE symbol = %s 
                 ORDER BY time DESC
@@ -2298,7 +3191,11 @@ class LiveDataManager:
     def get_current_signals(self, symbol):
         """Get current trading signals for symbol"""
         signals = {
-            'strategy_8': False
+            'strategy_8': False,
+            'strategy_12': False,
+            'strategy_10': False,
+            'strategy_11': False,
+            'strategy_9': False
         }
         
         try:
@@ -2309,6 +3206,17 @@ class LiveDataManager:
                 # Latest time has to be within 16 minutes(15 minutes plus 2 minute buffer) of current time to avoid stale data
                 if latest_15m['time'] > datetime.now(IST) - timedelta(minutes=17):
                     signals['strategy_8'] = bool(latest_15m.get('strategy_8', False))
+                    signals['strategy_12'] = bool(latest_15m.get('strategy_12', False))
+            
+            # Get latest 5m data
+            df_5m = self.get_latest_data(symbol, '5m', 1)
+            if not df_5m.empty:
+                latest_5m = df_5m.iloc[-1]
+                # Latest time has to be within 6 minutes(5 minutes plus 2 minute buffer) of current time to avoid stale data
+                if latest_5m['time'] > datetime.now(IST) - timedelta(minutes=7):
+                    signals['strategy_10'] = bool(latest_5m.get('strategy_10', False))
+                    signals['strategy_11'] = bool(latest_5m.get('strategy_11', False))
+                    signals['strategy_9'] = bool(latest_5m.get('strategy_9', False))
             
         except Exception as e:
             colored_log(self.logger, 'error', f"Error getting signals for {symbol}: {e}", success=False)
@@ -2548,11 +3456,11 @@ class LiveTradingEngine:
         if any(signals.values()):
             colored_log(self.logger, 'info', f"SIGNALS: {signals}", success=True)
         
-        # Check for long entries
-        long_signal = 1 if signals['strategy_8'] == 2 else 0
+        # Check for long entries (Strategy 12 and 11)
+        long_signal = signals['strategy_12'] or signals['strategy_11']
         if long_signal:
             colored_log(self.logger, 'info', f"LONG SIGNAL:: SYMBOL: {symbol} | STRATEGY: {strategy} | TIME: {current_time.strftime('%H:%M:%S')}", success=True)
-            strategy = '8'
+            strategy = '12' if signals['strategy_12'] else '11'
             can_trade, reason = self.position_manager.can_open_position(symbol, strategy, current_date)
             
             if can_trade:
@@ -2561,10 +3469,10 @@ class LiveTradingEngine:
                 colored_log(self.logger, 'debug', f"Cannot enter LONG {symbol} Strategy {strategy}: {reason}", success=True)
         
         # Check for short entries (Strategy 8, 10, 9)
-        short_signal = 1 if signals['strategy_8'] == 0 else 0
+        short_signal = signals['strategy_8'] or signals['strategy_10'] or signals['strategy_9']
         if short_signal:
             colored_log(self.logger, 'info', f"SHORT SIGNAL:: SYMBOL: {symbol} | STRATEGY: {strategy} | TIME: {current_time.strftime('%H:%M:%S')}", success=True)
-            strategy = '8'
+            strategy = '8' if signals['strategy_8'] else ('10' if signals['strategy_10'] else '9')
             can_trade, reason = self.position_manager.can_open_position(symbol, strategy, current_date)
             
             if can_trade:
